@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { query, getOne, run } from '../db';
 import { authenticateToken, requireAdmin, CustomRequest } from '../auth';
+import { logger } from '../logger';
 
 const router = Router();
 
@@ -28,7 +29,10 @@ router.get('/', async (req: CustomRequest, res: Response) => {
 // Create user
 router.post('/', async (req: CustomRequest, res: Response) => {
   try {
+    const adminId = req.user?.id!;
+    const adminEmail = req.user?.email!;
     const { name, email, password, role, user_group_id } = req.body;
+
     if (!name || !email || !password || !user_group_id) {
       return res.status(400).json({ error: 'Vui lòng nhập đầy đủ tên, email, mật khẩu và nhóm người dùng.' });
     }
@@ -50,6 +54,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
       [result.lastID]
     );
 
+    await logger.audit(adminId, adminEmail, 'ADMIN_CREATE_USER', `Tạo người dùng mới: ${email} (${role})`, req.ip);
+
     res.status(201).json({ message: 'Tạo người dùng thành công.', user: newUser });
   } catch (err: any) {
     res.status(500).json({ error: 'Không thể tạo người dùng mới.' });
@@ -59,6 +65,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
 // Update user
 router.put('/:id', async (req: CustomRequest, res: Response) => {
   try {
+    const adminId = req.user?.id!;
+    const adminEmail = req.user?.email!;
     const targetUserId = parseInt(req.params.id, 10);
     const { name, email, role, user_group_id, status, newPassword } = req.body;
 
@@ -89,6 +97,8 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       ]
     );
 
+    await logger.audit(adminId, adminEmail, 'ADMIN_UPDATE_USER', `Cập nhật tài khoản #${targetUserId} (${email || user.email})`, req.ip);
+
     res.json({ message: 'Cập nhật thông tin người dùng thành công.' });
   } catch (err: any) {
     res.status(500).json({ error: 'Lỗi khi cập nhật thông tin người dùng.' });
@@ -98,13 +108,20 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
 // Delete user
 router.delete('/:id', async (req: CustomRequest, res: Response) => {
   try {
+    const adminId = req.user?.id!;
+    const adminEmail = req.user?.email!;
     const targetUserId = parseInt(req.params.id, 10);
-    if (req.user?.id === targetUserId) {
+
+    if (adminId === targetUserId) {
       return res.status(400).json({ error: 'Bạn không thể tự xóa tài khoản Admin đang đăng nhập!' });
     }
 
+    const targetUser = await getOne(`SELECT email FROM users WHERE id = ?`, [targetUserId]);
+
     await run(`DELETE FROM users WHERE id = ?`, [targetUserId]);
     await run(`DELETE FROM token_usage_logs WHERE user_id = ?`, [targetUserId]);
+
+    await logger.audit(adminId, adminEmail, 'ADMIN_DELETE_USER', `Xóa tài khoản #${targetUserId} (${targetUser?.email || 'N/A'})`, req.ip);
 
     res.json({ message: 'Đã xóa người dùng thành công.' });
   } catch (err: any) {

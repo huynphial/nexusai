@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { getOne, query, run } from '../db';
 import { generateToken, authenticateToken, CustomRequest } from '../auth';
+import { logger } from '../logger';
 
 const router = Router();
 
@@ -10,6 +11,7 @@ router.post('/login', async (req: CustomRequest, res: Response) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
+      logger.debug('Auth', 'Login attempted without email or password');
       return res.status(400).json({ error: 'Vui lòng nhập Email và Mật khẩu.' });
     }
 
@@ -24,15 +26,18 @@ router.post('/login', async (req: CustomRequest, res: Response) => {
     );
 
     if (!user) {
+      logger.debug('Auth', `Login failed: user email "${email}" not found`);
       return res.status(401).json({ error: 'Email hoặc mật khẩu không chính xác.' });
     }
 
     if (user.status !== 'active') {
+      logger.debug('Auth', `Login failed: user "${email}" account suspended`);
       return res.status(403).json({ error: 'Tài khoản của bạn đã bị tạm khóa. Vui lòng liên hệ Admin.' });
     }
 
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
     if (!passwordMatch) {
+      logger.debug('Auth', `Login failed: incorrect password for "${email}"`);
       return res.status(401).json({ error: 'Email hoặc mật khẩu không chính xác.' });
     }
 
@@ -47,18 +52,21 @@ router.post('/login', async (req: CustomRequest, res: Response) => {
 
     const token = generateToken(authenticatedUser);
 
+    // Audit log
+    await logger.audit(user.id, user.email, 'USER_LOGIN', `Đăng nhập hệ thống thành công (Nhóm: ${user.group_name || 'Chưa xếp'})`, req.ip);
+
     res.json({
       message: 'Đăng nhập thành công',
       token,
       user: authenticatedUser
     });
   } catch (err: any) {
-    console.error('[AuthRoute] Login Error:', err);
+    logger.error('AuthRoute', 'Login Error', err);
     res.status(500).json({ error: 'Lỗi hệ thống khi xử lý đăng nhập.' });
   }
 });
 
-// Register (open demo registration - assigns to General Group by default)
+// Register
 router.post('/register', async (req: CustomRequest, res: Response) => {
   try {
     const { name, email, password } = req.body;
@@ -71,7 +79,6 @@ router.post('/register', async (req: CustomRequest, res: Response) => {
       return res.status(400).json({ error: 'Email này đã được đăng ký sử dụng.' });
     }
 
-    // Default to group 3 (General Group) or first group
     const defaultGroup = await getOne(`SELECT id FROM user_groups ORDER BY id ASC LIMIT 1`);
     const groupId = defaultGroup ? defaultGroup.id : 1;
 
@@ -97,13 +104,15 @@ router.post('/register', async (req: CustomRequest, res: Response) => {
 
     const token = generateToken(authenticatedUser);
 
+    await logger.audit(newUser.id, newUser.email, 'USER_REGISTER', `Tài khoản mới đăng ký hệ thống`, req.ip);
+
     res.status(201).json({
       message: 'Đăng ký tài khoản thành công',
       token,
       user: authenticatedUser
     });
   } catch (err: any) {
-    console.error('[AuthRoute] Register Error:', err);
+    logger.error('AuthRoute', 'Register Error', err);
     res.status(500).json({ error: 'Lỗi hệ thống khi đăng ký.' });
   }
 });
@@ -135,7 +144,7 @@ router.get('/me', authenticateToken, async (req: CustomRequest, res: Response) =
 // Change password / profile
 router.put('/profile', authenticateToken, async (req: CustomRequest, res: Response) => {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.id!;
     const { name, currentPassword, newPassword } = req.body;
 
     const user = await getOne(`SELECT * FROM users WHERE id = ?`, [userId]);
@@ -157,6 +166,8 @@ router.put('/profile', authenticateToken, async (req: CustomRequest, res: Respon
 
     const updatedName = name ? name.trim() : user.name;
     await run(`UPDATE users SET name = ?, password_hash = ? WHERE id = ?`, [updatedName, passwordHash, userId]);
+
+    await logger.audit(userId, user.email, 'UPDATE_PROFILE', 'Cập nhật thông tin cá nhân / mật khẩu', req.ip);
 
     res.json({ message: 'Cập nhật thông tin cá nhân thành công.' });
   } catch (err: any) {

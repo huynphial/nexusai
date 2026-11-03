@@ -3,6 +3,7 @@ import { query, getOne, run } from '../db';
 import { authenticateToken, CustomRequest } from '../auth';
 import { checkRateLimitAndQuota, logTokenUsage } from '../rateLimiter';
 import { generateAIChatResponse } from '../aiProvider';
+import { logger } from '../logger';
 
 const router = Router();
 router.use(authenticateToken);
@@ -17,7 +18,6 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
       return res.json({ models: [] });
     }
 
-    // Fetch active models accessible by this user group
     const models = await query(
       `
       SELECT m.id, m.name, m.provider, m.model_identifier, m.system_prompt, m.is_active,
@@ -30,7 +30,6 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
       [groupId]
     );
 
-    // Attach quota status for each model
     const modelsWithQuota = [];
     for (const m of models) {
       const quotaCheck = await checkRateLimitAndQuota(userId!, groupId, m.id);
@@ -45,7 +44,7 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
 
     res.json({ models: modelsWithQuota });
   } catch (err: any) {
-    console.error('[ChatRoute] Get available models error:', err);
+    logger.error('ChatRoute', 'Get available models error', err);
     res.status(500).json({ error: 'Không thể lấy danh sách mô hình AI được phân quyền.' });
   }
 });
@@ -74,7 +73,8 @@ router.get('/sessions', async (req: CustomRequest, res: Response) => {
 // Create chat session
 router.post('/sessions', async (req: CustomRequest, res: Response) => {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.id!;
+    const userEmail = req.user?.email!;
     const { model_id, title } = req.body;
 
     if (!model_id) {
@@ -91,6 +91,8 @@ router.post('/sessions', async (req: CustomRequest, res: Response) => {
       `INSERT INTO chat_sessions (user_id, model_id, title) VALUES (?, ?, ?)`,
       [userId, model_id, sessionTitle]
     );
+
+    await logger.audit(userId, userEmail, 'CREATE_CHAT_SESSION', `Tạo phiên chat mới #${result.lastID} với ${model.name}`, req.ip);
 
     res.status(201).json({
       session: {
@@ -111,11 +113,14 @@ router.post('/sessions', async (req: CustomRequest, res: Response) => {
 // Delete chat session
 router.delete('/sessions/:id', async (req: CustomRequest, res: Response) => {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.id!;
+    const userEmail = req.user?.email!;
     const sessionId = parseInt(req.params.id, 10);
 
     await run(`DELETE FROM chat_sessions WHERE id = ? AND user_id = ?`, [sessionId, userId]);
     await run(`DELETE FROM chat_messages WHERE session_id = ?`, [sessionId]);
+
+    await logger.audit(userId, userEmail, 'DELETE_CHAT_SESSION', `Xóa phiên trò chuyện #${sessionId}`, req.ip);
 
     res.json({ message: 'Đã xóa cuộc trò chuyện.' });
   } catch (err: any) {
@@ -146,6 +151,7 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
 router.post('/send', async (req: CustomRequest, res: Response) => {
   try {
     const userId = req.user?.id!;
+    const userEmail = req.user?.email!;
     const groupId = req.user?.user_group_id!;
     const { session_id, model_id, prompt } = req.body;
 
@@ -156,7 +162,6 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     let currentSessionId = session_id;
     let targetModelId = model_id;
 
-    // If session_id provided, verify ownership and fetch model_id
     if (currentSessionId) {
       const session = await getOne(`SELECT * FROM chat_sessions WHERE id = ? AND user_id = ?`, [currentSessionId, userId]);
       if (!session) {
@@ -169,22 +174,27 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
       }
     }
 
-    // 1. Fetch model configuration
     const modelConfig = await getOne(`SELECT * FROM ai_models WHERE id = ? AND is_active = 1`, [targetModelId]);
     if (!modelConfig) {
       return res.status(404).json({ error: 'Mô hình AI này hiện không khả dụng hoặc đã bị ngưng hoạt động.' });
     }
 
-    // 2. CHECK RATE LIMIT & TOKEN QUOTA
+    // Rate Limit Check
     const limitCheck = await checkRateLimitAndQuota(userId, groupId, targetModelId);
     if (!limitCheck.allowed) {
+      await logger.audit(
+        userId,
+        userEmail,
+        'RATE_LIMIT_BLOCKED',
+        `Chặn truy vấn do vượt quá Quota mô hình ${modelConfig.name}: ${limitCheck.reason}`,
+        req.ip
+      );
       return res.status(429).json({
         error: limitCheck.reason || 'Đã vượt quá giới hạn truy cập.',
         usage: limitCheck.usage
       });
     }
 
-    // 3. Create session if it doesn't exist yet
     if (!currentSessionId) {
       const autoTitle = prompt.trim().substring(0, 30) + (prompt.trim().length > 30 ? '...' : '');
       const newSessionRes = await run(
@@ -194,33 +204,36 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
       currentSessionId = newSessionRes.lastID;
     }
 
-    // Save User message in database
     await run(
       `INSERT INTO chat_messages (session_id, sender, content, tokens_used) VALUES (?, 'user', ?, 0)`,
       [currentSessionId, prompt.trim()]
     );
 
-    // Fetch conversation history (last 10 messages for context)
     const history = await query(
       `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 10`,
       [currentSessionId]
     );
-    history.reverse(); // Chronological order
+    history.reverse();
 
-    // 4. CALL AI PROVIDER (Gemini or OpenAI Compatible)
+    // Call AI provider
     const aiResult = await generateAIChatResponse(modelConfig, history);
 
-    // Save Assistant response in database
     const assistantMsgRes = await run(
       `INSERT INTO chat_messages (session_id, sender, content, tokens_used) VALUES (?, 'assistant', ?, ?)`,
       [currentSessionId, aiResult.content, aiResult.tokensUsed]
     );
 
-    // 5. LOG TOKEN USAGE & UPDATE SESSION TIMESTAMPS
     await logTokenUsage(userId, groupId, targetModelId, aiResult.tokensUsed);
     await run(`UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [currentSessionId]);
 
-    // Re-check updated quota statistics for response payload
+    await logger.audit(
+      userId,
+      userEmail,
+      'SEND_LLM_PROMPT',
+      `Gửi yêu cầu tới ${modelConfig.name} (${aiResult.tokensUsed} tokens tiêu thụ)`,
+      req.ip
+    );
+
     const updatedQuota = await checkRateLimitAndQuota(userId, groupId, targetModelId);
 
     res.json({
@@ -236,7 +249,7 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
       updated_quota: updatedQuota.usage
     });
   } catch (err: any) {
-    console.error('[ChatRoute] Send message error:', err);
+    logger.error('ChatRoute', 'Send message error', err);
     res.status(500).json({ error: 'Lỗi khi xử lý tin nhắn với mô hình AI.' });
   }
 });

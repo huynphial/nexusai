@@ -136,41 +136,7 @@ export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
             </button>
           </form>
 
-          {/* Demo Login Presets */}
-          {!isRegister && (
-            <div className="mt-6 pt-4 border-t border-slate-200 dark:border-slate-800">
-              <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-2 flex items-center gap-1">
-                <Key className="w-3.5 h-3.5 text-indigo-500" />
-                Tài khoản dùng thử có sẵn:
-              </div>
-              <div className="grid grid-cols-3 gap-1.5 text-[11px]">
-                <button
-                  type="button"
-                  onClick={() => handleFillDemo('admin@nexusai.io', 'admin123')}
-                  className="p-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-400 border border-amber-500/20 text-center font-medium transition-colors"
-                >
-                  <div className="font-bold">Admin</div>
-                  <div className="text-[9px] opacity-75">Ban Giám Đốc</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleFillDemo('tech_lead@nexusai.io', 'user123')}
-                  className="p-2 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-700 dark:text-indigo-400 border border-indigo-500/20 text-center font-medium transition-colors"
-                >
-                  <div className="font-bold">R&D Lead</div>
-                  <div className="text-[9px] opacity-75">Phòng R&D</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleFillDemo('staff@nexusai.io', 'user123')}
-                  className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 text-center font-medium transition-colors"
-                >
-                  <div className="font-bold">Staff</div>
-                  <div className="text-[9px] opacity-75">General</div>
-                </button>
-              </div>
-            </div>
-          )}
+
 
           {/* Toggle Register / Login */}
           <div className="mt-4 text-center text-xs text-slate-500">

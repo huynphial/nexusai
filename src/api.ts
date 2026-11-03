@@ -89,5 +89,6 @@ export const api = {
 
   // Dashboard
   getDashboardStats: () => request<DashboardStats>('/dashboard/stats'),
+  getAuditLogs: () => request<{ audit_logs: import('./types').AuditLog[] }>('/dashboard/audit-logs'),
   getSystemEnv: () => request<SystemEnvInfo>('/dashboard/system-env'),
 };

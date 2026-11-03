@@ -24,10 +24,18 @@ async function getDb(): Promise<SqlJsDatabase> {
 
   const SQL = await initSqlJs({
     locateFile: (file) => {
-      const distWasm = path.resolve(__dirname, file);
+      // 1. Check process.cwd() node_modules (development)
+      const cwdNodeWasm = path.resolve(process.cwd(), 'node_modules/sql.js/dist', file);
+      if (fs.existsSync(cwdNodeWasm)) return cwdNodeWasm;
+
+      // 2. Check current __dirname (production dist/ folder)
+      const currentDirWasm = path.resolve(__dirname, file);
+      if (fs.existsSync(currentDirWasm)) return currentDirWasm;
+
+      // 3. Check dist directory relative
+      const distWasm = path.resolve(process.cwd(), 'dist', file);
       if (fs.existsSync(distWasm)) return distWasm;
-      const nodeWasm = path.resolve(__dirname, '../node_modules/sql.js/dist', file);
-      if (fs.existsSync(nodeWasm)) return nodeWasm;
+
       return file;
     }
   });
@@ -183,6 +191,19 @@ export async function initDatabase() {
       )
     `);
 
+    // 8. User Action Audit Logs table
+    await run(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        user_email TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT NOT NULL,
+        ip_address TEXT DEFAULT '127.0.0.1',
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     await seedDefaults();
     console.log('[Database] WebAssembly SQLite schema initialization & seed complete.');
   } catch (err) {
@@ -229,22 +250,12 @@ async function seedDefaults() {
     const adminEmail = process.env.DEFAULT_ADMIN_EMAIL || 'admin@nexusai.io';
     const adminPassword = process.env.DEFAULT_ADMIN_PASSWORD || 'admin123';
     const hashedAdminPass = await bcrypt.hash(adminPassword, 10);
-    const hashedUserPass = await bcrypt.hash('user123', 10);
 
+    // Initial Admin Account
     await run(`
       INSERT INTO users (name, email, password_hash, role, user_group_id, status)
       VALUES (?, ?, ?, ?, ?, ?)
     `, ['System Admin', adminEmail, hashedAdminPass, 'admin', execGroupId, 'active']);
-
-    await run(`
-      INSERT INTO users (name, email, password_hash, role, user_group_id, status)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, ['Trần Văn R&D', 'tech_lead@nexusai.io', hashedUserPass, 'user', rdGroupId, 'active']);
-
-    await run(`
-      INSERT INTO users (name, email, password_hash, role, user_group_id, status)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, ['Nguyễn Văn Nhân Viên', 'staff@nexusai.io', hashedUserPass, 'user', generalGroupId, 'active']);
   }
 
   const existingModels = await query(`SELECT COUNT(*) as count FROM ai_models`);

@@ -108,14 +108,26 @@ export interface DashboardStats {
   }>;
 }
 
+export interface AuditLog {
+  id: number;
+  user_id: number;
+  user_email: string;
+  action: string;
+  details: string;
+  ip_address: string;
+  timestamp: string;
+}
+
 export interface SystemEnvInfo {
   env: {
+    NODE_ENV: string;
     DB_TYPE: string;
     DB_FILE: string;
     PORT: string;
     DEFAULT_ADMIN_EMAIL: string;
     HAS_GEMINI_API_KEY: boolean;
     JWT_SECRET_CONFIGURED: boolean;
+    DEBUG_LOG_ENABLED: boolean;
   };
   status: string;
   timestamp: string;

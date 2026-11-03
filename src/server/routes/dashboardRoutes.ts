@@ -1,11 +1,12 @@
 import { Router, Response } from 'express';
 import { query, getOne } from '../db';
 import { authenticateToken, requireAdmin, CustomRequest } from '../auth';
+import { isDebugEnabled } from '../logger';
 
 const router = Router();
 router.use(authenticateToken);
 
-// Dashboard stats endpoint (accessible by Admin or Users for overall platform stats)
+// Dashboard stats endpoint
 router.get('/stats', async (req: CustomRequest, res: Response) => {
   try {
     const totalUsers = await getOne(`SELECT COUNT(*) as count FROM users`);
@@ -13,21 +14,18 @@ router.get('/stats', async (req: CustomRequest, res: Response) => {
     const totalModels = await getOne(`SELECT COUNT(*) as count FROM ai_models WHERE is_active = 1`);
     const totalMessages = await getOne(`SELECT COUNT(*) as count FROM chat_messages`);
 
-    // Tokens consumed today
     const tokensToday = await getOne(`
       SELECT COALESCE(SUM(tokens_count), 0) as total
       FROM token_usage_logs
       WHERE timestamp >= datetime('now', '-1 day')
     `);
 
-    // Tokens consumed this month
     const tokensMonth = await getOne(`
       SELECT COALESCE(SUM(tokens_count), 0) as total
       FROM token_usage_logs
       WHERE timestamp >= datetime('now', '-30 day')
     `);
 
-    // Token consumption by Model
     const tokensByModel = await query(`
       SELECT m.name as model_name, m.provider, COALESCE(SUM(l.tokens_count), 0) as total_tokens
       FROM ai_models m
@@ -36,7 +34,6 @@ router.get('/stats', async (req: CustomRequest, res: Response) => {
       ORDER BY total_tokens DESC
     `);
 
-    // Token consumption by User Group
     const tokensByGroup = await query(`
       SELECT g.name as group_name, COALESCE(SUM(l.tokens_count), 0) as total_tokens
       FROM user_groups g
@@ -45,7 +42,6 @@ router.get('/stats', async (req: CustomRequest, res: Response) => {
       ORDER BY total_tokens DESC
     `);
 
-    // Daily token usage trend for last 7 days
     const dailyTrend = await query(`
       SELECT strftime('%Y-%m-%d', timestamp) as date, COALESCE(SUM(tokens_count), 0) as tokens
       FROM token_usage_logs
@@ -54,7 +50,6 @@ router.get('/stats', async (req: CustomRequest, res: Response) => {
       ORDER BY date ASC
     `);
 
-    // Recent activity log
     const recentLogs = await query(`
       SELECT l.id, l.tokens_count, l.timestamp,
              u.name as user_name, u.email as user_email,
@@ -88,6 +83,20 @@ router.get('/stats', async (req: CustomRequest, res: Response) => {
   }
 });
 
+// Audit Logs endpoint (Admin only)
+router.get('/audit-logs', requireAdmin, async (req: CustomRequest, res: Response) => {
+  try {
+    const logs = await query(`
+      SELECT * FROM audit_logs
+      ORDER BY id DESC
+      LIMIT 50
+    `);
+    res.json({ audit_logs: logs });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Không thể tải nhật ký thao tác audit.' });
+  }
+});
+
 // System .env and DB connection info monitor
 router.get('/system-env', requireAdmin, async (req: CustomRequest, res: Response) => {
   try {
@@ -99,12 +108,14 @@ router.get('/system-env', requireAdmin, async (req: CustomRequest, res: Response
 
     res.json({
       env: {
+        NODE_ENV: process.env.NODE_ENV || 'development',
         DB_TYPE: dbType,
         DB_FILE: dbFile,
         PORT: port,
         DEFAULT_ADMIN_EMAIL: defaultAdmin,
         HAS_GEMINI_API_KEY: hasGeminiKey,
-        JWT_SECRET_CONFIGURED: !!process.env.JWT_SECRET
+        JWT_SECRET_CONFIGURED: !!process.env.JWT_SECRET,
+        DEBUG_LOG_ENABLED: isDebugEnabled()
       },
       status: 'Online',
       timestamp: new Date().toISOString()

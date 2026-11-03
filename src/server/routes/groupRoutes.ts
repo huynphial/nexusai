@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { query, getOne, run } from '../db';
 import { authenticateToken, requireAdmin, CustomRequest } from '../auth';
+import { logger } from '../logger';
 
 const router = Router();
 
@@ -17,7 +18,6 @@ router.get('/', async (req: CustomRequest, res: Response) => {
       ORDER BY g.id ASC
     `);
 
-    // Fetch model access matrix for all groups
     const accessRules = await query(`
       SELECT gma.*, m.name as model_name, m.provider, m.model_identifier
       FROM group_model_access gma
@@ -38,7 +38,10 @@ router.get('/', async (req: CustomRequest, res: Response) => {
 // Create group
 router.post('/', async (req: CustomRequest, res: Response) => {
   try {
+    const adminId = req.user?.id!;
+    const adminEmail = req.user?.email!;
     const { name, description, access_rules } = req.body;
+
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Tên nhóm người dùng không được để trống.' });
     }
@@ -55,7 +58,6 @@ router.post('/', async (req: CustomRequest, res: Response) => {
 
     const groupId = resGroup.lastID;
 
-    // Save model access rules if provided
     if (Array.isArray(access_rules)) {
       for (const rule of access_rules) {
         if (rule.model_id) {
@@ -78,6 +80,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
       }
     }
 
+    await logger.audit(adminId, adminEmail, 'ADMIN_CREATE_GROUP', `Tạo nhóm người dùng mới "${name}" (#${groupId})`, req.ip);
+
     res.status(201).json({ message: 'Tạo nhóm thành công.', groupId });
   } catch (err: any) {
     res.status(500).json({ error: 'Không thể tạo nhóm mới.' });
@@ -87,6 +91,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
 // Update group metadata & model access matrix
 router.put('/:id', async (req: CustomRequest, res: Response) => {
   try {
+    const adminId = req.user?.id!;
+    const adminEmail = req.user?.email!;
     const groupId = parseInt(req.params.id, 10);
     const { name, description, access_rules } = req.body;
 
@@ -103,7 +109,6 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       ]);
     }
 
-    // Replace access rules matrix if provided
     if (Array.isArray(access_rules)) {
       await run(`DELETE FROM group_model_access WHERE group_id = ?`, [groupId]);
 
@@ -128,6 +133,8 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       }
     }
 
+    await logger.audit(adminId, adminEmail, 'ADMIN_UPDATE_GROUP', `Cập nhật nhóm & ma trận Rate Limit cho nhóm #${groupId} (${name || group.name})`, req.ip);
+
     res.json({ message: 'Cập nhật nhóm và cấu hình phân quyền mô hình thành công.' });
   } catch (err: any) {
     res.status(500).json({ error: 'Lỗi khi cập nhật nhóm người dùng.' });
@@ -137,6 +144,8 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
 // Delete group
 router.delete('/:id', async (req: CustomRequest, res: Response) => {
   try {
+    const adminId = req.user?.id!;
+    const adminEmail = req.user?.email!;
     const groupId = parseInt(req.params.id, 10);
     const memberCount = await getOne(`SELECT COUNT(*) as count FROM users WHERE user_group_id = ?`, [groupId]);
 
@@ -146,8 +155,12 @@ router.delete('/:id', async (req: CustomRequest, res: Response) => {
       });
     }
 
+    const group = await getOne(`SELECT name FROM user_groups WHERE id = ?`, [groupId]);
+
     await run(`DELETE FROM user_groups WHERE id = ?`, [groupId]);
     await run(`DELETE FROM group_model_access WHERE group_id = ?`, [groupId]);
+
+    await logger.audit(adminId, adminEmail, 'ADMIN_DELETE_GROUP', `Xóa nhóm #${groupId} (${group?.name || 'N/A'})`, req.ip);
 
     res.json({ message: 'Đã xóa nhóm thành công.' });
   } catch (err: any) {

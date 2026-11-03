@@ -6,10 +6,11 @@ import { UserManagementTab } from './UserManagementTab';
 import { GroupManagementTab } from './GroupManagementTab';
 import { ModelManagementTab } from './ModelManagementTab';
 import { SystemEnvTab } from './SystemEnvTab';
-import { LayoutDashboard, Users, Shield, Cpu, FileCode, RefreshCw } from 'lucide-react';
+import { AuditLogsTab } from './AuditLogsTab';
+import { LayoutDashboard, Users, Shield, Cpu, FileCode, RefreshCw, ShieldCheck } from 'lucide-react';
 
 export const DashboardMain: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'groups' | 'models' | 'env'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'groups' | 'models' | 'audit' | 'env'>('overview');
 
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [users, setUsers] = useState<User[]>([]);
@@ -100,7 +101,7 @@ export const DashboardMain: React.FC = () => {
             <span>Dashboard Quản Trị Hệ Thống NexusAI</span>
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Quản lý tập trung Mô hình Chat LLM, Khai báo ChatGPT Token, Phân quyền Nhóm & Giới hạn Rate Limit đa tầng.
+            Quản lý tập trung Mô hình Chat LLM, Khai báo ChatGPT Token, Phân quyền Nhóm, Rate Limit & Audit Logs.
           </p>
         </div>
 
@@ -164,6 +165,18 @@ export const DashboardMain: React.FC = () => {
         </button>
 
         <button
+          onClick={() => setActiveTab('audit')}
+          className={`flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
+            activeTab === 'audit'
+              ? 'bg-indigo-600 text-white shadow-xs'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+          }`}
+        >
+          <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+          <span>Nhật Ký Thao Tác Audit</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('env')}
           className={`flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
             activeTab === 'env'
@@ -207,6 +220,8 @@ export const DashboardMain: React.FC = () => {
           onDeleteModel={handleDeleteModel}
         />
       )}
+
+      {activeTab === 'audit' && <AuditLogsTab />}
 
       {activeTab === 'env' && <SystemEnvTab />}
     </div>

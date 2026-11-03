@@ -45,7 +45,11 @@ async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: false as const,
+      },
       appType: 'custom',
     });
 
@@ -57,24 +61,11 @@ async function startServer() {
         return next();
       }
       try {
-        let template = await vite.transformIndexHtml(url, `
-          <!doctype html>
-          <html lang="en">
-            <head>
-              <meta charset="UTF-8" />
-              <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-              <title>NexusAI - LLM Chat & Enterprise Portal</title>
-              <meta name="description" content="Nền tảng Quản lý Chat LLM, Quản lý Nhóm người dùng, Phân quyền Model & Giới hạn Rate Limit / Token đa tầng." />
-              <link rel="preconnect" href="https://fonts.googleapis.com">
-              <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-              <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-            </head>
-            <body>
-              <div id="root"></div>
-              <script type="module" src="/src/main.tsx"></script>
-            </body>
-          </html>
-        `);
+        const indexHtmlPath = path.resolve(__dirname, 'index.html');
+        let htmlStr = fs.existsSync(indexHtmlPath)
+          ? fs.readFileSync(indexHtmlPath, 'utf-8')
+          : `<!doctype html><html><head><title>NexusAI</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>`;
+        let template = await vite.transformIndexHtml(url, htmlStr);
         res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
       } catch (e: any) {
         vite.ssrFixStacktrace(e);

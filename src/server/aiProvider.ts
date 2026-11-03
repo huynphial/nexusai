@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { logger } from './logger';
 
 export interface ChatMessageItem {
   role: 'user' | 'assistant' | 'system';
@@ -25,6 +26,12 @@ export async function generateAIChatResponse(
   messages: ChatMessageItem[]
 ): Promise<AIResponse> {
   const systemPrompt = modelConfig.system_prompt || 'Bạn là trợ lý AI hữu ích và thông minh.';
+  const startTime = Date.now();
+
+  logger.debug('AIProvider', `Initiating request to model: "${modelConfig.name}" (${modelConfig.provider}:${modelConfig.model_identifier})`, {
+    messageCount: messages.length,
+    systemPromptLength: systemPrompt.length
+  });
 
   if (modelConfig.provider === 'gemini') {
     // 1. Gemini Server-Side Execution
@@ -32,7 +39,7 @@ export async function generateAIChatResponse(
     const modelName = modelConfig.model_identifier || 'gemini-3.8-flash';
 
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-      console.warn('[AIProvider] GEMINI_API_KEY not configured in env, providing intelligent assistant fallback response.');
+      logger.info('AIProvider', 'GEMINI_API_KEY not set or placeholder. Using fallback message handler.');
     }
 
     try {
@@ -45,7 +52,6 @@ export async function generateAIChatResponse(
         },
       });
 
-      // Prepare contents list
       const formattedContents = messages.map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: m.content }],
@@ -59,17 +65,30 @@ export async function generateAIChatResponse(
         },
       });
 
+      const duration = Date.now() - startTime;
       const responseText = res.text || 'Không có phản hồi từ Gemini.';
       const promptLength = messages.reduce((acc, m) => acc + m.content.length, 0) + systemPrompt.length;
       const estimatedTokens = Math.ceil((promptLength + responseText.length) / 4);
+      const totalTokens = res.usageMetadata?.totalTokenCount || estimatedTokens;
+
+      logger.apiDebug(
+        'GeminiSDK',
+        `gemini://${modelName}`,
+        { model: modelName, systemInstruction: systemPrompt, contentsCount: formattedContents.length },
+        200,
+        { textSnippet: responseText.substring(0, 150) + '...', tokensUsed: totalTokens },
+        duration
+      );
 
       return {
         content: responseText,
-        tokensUsed: res.usageMetadata?.totalTokenCount || estimatedTokens,
+        tokensUsed: totalTokens,
       };
     } catch (err: any) {
-      console.error('[AIProvider] Gemini API Error:', err.message || err);
-      // Fallback message if key fails or model unreachable
+      const duration = Date.now() - startTime;
+      logger.error('AIProvider', `Gemini API execution error: ${err.message || err}`, err);
+      logger.apiDebug('GeminiSDK', `gemini://${modelName}`, { model: modelName }, 500, { error: err.message }, duration);
+
       return {
         content: `**[Gemini System Alert]** Phản hồi được xử lý qua Gemini (${modelName}):\n\nPhản hồi thông minh của bạn cho yêu cầu vừa gửi:\n\n` +
           `Xin chào! Tôi đã nhận được yêu cầu của bạn. Hệ thống NexusAI đang kích hoạt cấu hình mô hình **${modelConfig.name}** với System Prompt: *"${systemPrompt}"*.\n\n` +
@@ -89,7 +108,6 @@ export async function generateAIChatResponse(
     ];
 
     if (!apiToken) {
-      // Simulate/fallback response if admin hasn't provided API token yet
       const simulatedResponse =
         `### Phản hồi từ ${modelConfig.name} (${modelId})\n\n` +
         `Xin chào! Bạn đang sử dụng mô hình AI được phân quyền cho nhóm người dùng của mình.\n\n` +
@@ -101,28 +119,35 @@ export async function generateAIChatResponse(
         `> 💡 **Lưu ý Admin:** Để nhận câu trả lời thực tế từ ChatGPT/OpenAI hoặc DeepSeek API, vui lòng nhập **API Token / AI Token** cho mô hình này tại trang **Dashboard Admin -> Quản lý Mô hình AI**!`;
 
       const estimatedTokens = Math.ceil((JSON.stringify(fullMessages).length + simulatedResponse.length) / 4);
+      logger.debug('AIProvider', `No API Token provided for ${modelConfig.name}. Returning structured guidance payload.`);
       return {
         content: simulatedResponse,
         tokensUsed: estimatedTokens,
       };
     }
 
+    const endpointUrl = `${baseUrl}/chat/completions`;
+    const requestPayload = {
+      model: modelId,
+      messages: fullMessages,
+      temperature: 0.7,
+    };
+
     try {
-      const response = await fetch(`${baseUrl}/chat/completions`, {
+      const response = await fetch(endpointUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiToken}`,
         },
-        body: JSON.stringify({
-          model: modelId,
-          messages: fullMessages,
-          temperature: 0.7,
-        }),
+        body: JSON.stringify(requestPayload),
       });
+
+      const duration = Date.now() - startTime;
 
       if (!response.ok) {
         const errText = await response.text();
+        logger.apiDebug('OpenAI_Compatible', endpointUrl, requestPayload, response.status, { error: errText }, duration);
         throw new Error(`HTTP ${response.status}: ${errText}`);
       }
 
@@ -130,12 +155,24 @@ export async function generateAIChatResponse(
       const content = data.choices?.[0]?.message?.content || 'Không có phản hồi từ dịch vụ OpenAI.';
       const tokensUsed = data.usage?.total_tokens || Math.ceil((JSON.stringify(fullMessages).length + content.length) / 4);
 
+      logger.apiDebug(
+        'OpenAI_Compatible',
+        endpointUrl,
+        requestPayload,
+        response.status,
+        { contentSnippet: content.substring(0, 150) + '...', usage: data.usage },
+        duration
+      );
+
       return {
         content,
         tokensUsed,
       };
     } catch (err: any) {
-      console.error('[AIProvider] OpenAI API Error:', err.message || err);
+      const duration = Date.now() - startTime;
+      logger.error('AIProvider', `OpenAI API fetch error: ${err.message || err}`, err);
+      logger.apiDebug('OpenAI_Compatible', endpointUrl, requestPayload, 500, { error: err.message }, duration);
+
       return {
         content: `**[Lỗi Kết Nối AI Token]** Không thể gọi API đến \`${baseUrl}\` (${modelId}):\n\n` +
           `\`\`\`\n${err.message}\n\`\`\`\n\n` +

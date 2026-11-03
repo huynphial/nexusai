@@ -99,6 +99,23 @@ export const SystemEnvTab: React.FC = () => {
                   {info.env.PORT}
                 </span>
               </div>
+              <div className="flex justify-between py-1 border-b border-slate-100 dark:border-slate-800">
+                <span className="text-slate-500 dark:text-slate-400">Chế độ Môi trường (NODE_ENV):</span>
+                <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400 uppercase">
+                  {info.env.NODE_ENV}
+                </span>
+              </div>
+
+              <div className="flex justify-between py-1 border-b border-slate-100 dark:border-slate-800">
+                <span className="text-slate-500 dark:text-slate-400">Debug Logging (DEBUG_LOG):</span>
+                {info.env.DEBUG_LOG_ENABLED ? (
+                  <span className="inline-flex items-center gap-1 text-purple-600 dark:text-purple-400 font-bold font-mono">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-purple-500" /> BẬT (Log chi tiết API)
+                  </span>
+                ) : (
+                  <span className="text-slate-400 font-mono">TẮT (DEBUG_LOG="false")</span>
+                )}
+              </div>
 
               <div className="flex justify-between py-1 border-b border-slate-100 dark:border-slate-800">
                 <span className="text-slate-500 dark:text-slate-400">Admin Email mặc định:</span>
