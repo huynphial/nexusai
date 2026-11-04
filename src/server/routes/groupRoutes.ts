@@ -13,7 +13,8 @@ router.get('/', async (req: CustomRequest, res: Response) => {
   try {
     const groups = await query(`
       SELECT g.*,
-             (SELECT COUNT(*) FROM users WHERE user_group_id = g.id) as member_count
+             (SELECT COUNT(*) FROM users WHERE user_group_id = g.id) as member_count,
+             (SELECT name FROM ai_models WHERE id = g.default_model_id) as default_model_name
       FROM user_groups g
       ORDER BY g.id ASC
     `);
@@ -40,7 +41,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
   try {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
-    const { name, description, access_rules } = req.body;
+    const { name, description, default_model_id, access_rules } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Tên nhóm người dùng không được để trống.' });
@@ -52,8 +53,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
     }
 
     const resGroup = await run(
-      `INSERT INTO user_groups (name, description) VALUES (?, ?)`,
-      [name.trim(), description ? description.trim() : '']
+      `INSERT INTO user_groups (name, description, default_model_id) VALUES (?, ?, ?)`,
+      [name.trim(), description ? description.trim() : '', default_model_id ? Number(default_model_id) : null]
     );
 
     const groupId = resGroup.lastID;
@@ -94,20 +95,23 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
     const groupId = parseInt(req.params.id, 10);
-    const { name, description, access_rules } = req.body;
+    const { name, description, default_model_id, access_rules } = req.body;
 
     const group = await getOne(`SELECT * FROM user_groups WHERE id = ?`, [groupId]);
     if (!group) {
       return res.status(404).json({ error: 'Nhóm không tồn tại.' });
     }
 
-    if (name) {
-      await run(`UPDATE user_groups SET name = ?, description = ? WHERE id = ?`, [
-        name.trim(),
-        description !== undefined ? description.trim() : group.description,
-        groupId
-      ]);
-    }
+    const updatedDefaultModelId = default_model_id !== undefined
+      ? (default_model_id ? Number(default_model_id) : null)
+      : group.default_model_id;
+
+    await run(`UPDATE user_groups SET name = ?, description = ?, default_model_id = ? WHERE id = ?`, [
+      name ? name.trim() : group.name,
+      description !== undefined ? description.trim() : group.description,
+      updatedDefaultModelId,
+      groupId
+    ]);
 
     if (Array.isArray(access_rules)) {
       await run(`DELETE FROM group_model_access WHERE group_id = ?`, [groupId]);

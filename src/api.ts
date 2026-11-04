@@ -75,25 +75,26 @@ export const api = {
   deleteModel: (id: number) => request<{ message: string }>(`/admin/models/${id}`, { method: 'DELETE' }),
 
   // Chat
-  getAvailableModels: () => request<{ models: ModelWithQuota[] }>('/chat/available-models'),
+  getAvailableModels: () => request<{ models: ModelWithQuota[]; default_model_id?: number | null }>('/chat/available-models'),
   getSessions: () => request<{ sessions: ChatSession[] }>('/chat/sessions'),
   createSession: (data: { model_id: number; title?: string }) =>
     request<{ session: ChatSession }>('/chat/sessions', { method: 'POST', body: JSON.stringify(data) }),
   deleteSession: (id: number) => request<{ message: string }>(`/chat/sessions/${id}`, { method: 'DELETE' }),
   getSessionMessages: (sessionId: number) => request<{ messages: ChatMessage[] }>(`/chat/sessions/${sessionId}/messages`),
-  sendMessage: (data: { session_id?: number; model_id?: number; prompt: string }) =>
+  sendMessage: (data: { session_id?: number; model_id?: number; prompt: string; enable_thinking?: boolean }) =>
     request<{ session_id: number; message: ChatMessage; updated_quota?: any }>('/chat/send', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   streamMessage: async (
-    data: { session_id?: number; model_id?: number; prompt: string },
+    data: { session_id?: number; model_id?: number; prompt: string; enable_thinking?: boolean },
     callbacks: {
       onChunk: (chunk: { type: 'thinking' | 'content'; text: string }) => void;
       onDone: (res: { session_id: number; message: ChatMessage; updated_quota?: any }) => void;
       onError: (err: string) => void;
-    }
+    },
+    signal?: AbortSignal
   ) => {
     const token = localStorage.getItem('nexus_jwt_token');
     const headers: Record<string, string> = {
@@ -108,6 +109,7 @@ export const api = {
         method: 'POST',
         headers,
         body: JSON.stringify(data),
+        signal,
       });
 
       if (!response.ok) {

@@ -235,6 +235,12 @@ export async function initDatabase() {
       if (!msgColNames.includes('tokens_per_second')) {
         await run(`ALTER TABLE chat_messages ADD COLUMN tokens_per_second REAL DEFAULT 0`);
       }
+
+      const groupCols = await query(`PRAGMA table_info(user_groups)`);
+      const groupColNames = groupCols.map((c: any) => c.name);
+      if (!groupColNames.includes('default_model_id')) {
+        await run(`ALTER TABLE user_groups ADD COLUMN default_model_id INTEGER`);
+      }
     } catch (migErr) {
       console.warn('[Database] Column migration notice:', migErr);
     }

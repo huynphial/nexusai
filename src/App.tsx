@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
@@ -55,15 +55,17 @@ function MainContent() {
 
     try {
       const [modelsRes, sessionsRes] = await Promise.all([
-        api.getAvailableModels().catch(() => ({ models: [] })),
+        api.getAvailableModels().catch(() => ({ models: [], default_model_id: null })),
         api.getSessions().catch(() => ({ sessions: [] })),
       ]);
 
       const modelsList = modelsRes.models || [];
       setAvailableModels(modelsList);
 
+      const defaultId = modelsRes.default_model_id;
       if (modelsList.length > 0 && !selectedModelId) {
-        setSelectedModelId(modelsList[0].id);
+        const preferredModel = (defaultId && modelsList.find((m) => m.id === defaultId)) || modelsList[0];
+        setSelectedModelId(preferredModel.id);
       }
 
       const sessionsList = sessionsRes.sessions || [];
@@ -116,6 +118,11 @@ function MainContent() {
     setActiveSessionId(null);
     setMessages([]);
     setChatError(null);
+    // When creating a new chat session, automatically pick the group's default model
+    const defaultModel = availableModels.find((m) => m.is_default) || availableModels[0];
+    if (defaultModel) {
+      setSelectedModelId(defaultModel.id);
+    }
   };
 
   const handleDeleteSession = async (id: number) => {
@@ -131,6 +138,11 @@ function MainContent() {
   };
 
   const [streamingData, setStreamingData] = useState<{ content: string; thinking?: string; isThinking?: boolean } | null>(null);
+  const [thinkingEnabled, setThinkingEnabled] = useState(true);
+  const [isStreamPaused, setIsStreamPaused] = useState(false);
+  const isPausedRef = useRef(false);
+  const pauseResolverRef = useRef<(() => void) | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // If user role is not admin, keep in chat view
   useEffect(() => {
@@ -138,6 +150,51 @@ function MainContent() {
       setActiveView('chat');
     }
   }, [user, activeView]);
+
+  const handleCancelStream = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    if (pauseResolverRef.current) {
+      pauseResolverRef.current();
+      pauseResolverRef.current = null;
+    }
+    isPausedRef.current = false;
+    setIsStreamPaused(false);
+
+    if (streamingData && (streamingData.content || streamingData.thinking)) {
+      const partialMsg: ChatMessage = {
+        id: Date.now(),
+        session_id: activeSessionId || 0,
+        sender: 'assistant',
+        content: streamingData.content || '(Đã hủy tiến trình nhận phản hồi)',
+        thinking_content: streamingData.thinking || undefined,
+        tokens_used: Math.ceil(((streamingData.content || '').length + (streamingData.thinking || '').length) / 4),
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, partialMsg]);
+    }
+
+    setStreamingData(null);
+    setSendingMessage(false);
+  };
+
+  const handleTogglePauseStream = () => {
+    if (isStreamPaused) {
+      // Resume
+      isPausedRef.current = false;
+      setIsStreamPaused(false);
+      if (pauseResolverRef.current) {
+        pauseResolverRef.current();
+        pauseResolverRef.current = null;
+      }
+    } else {
+      // Pause
+      isPausedRef.current = true;
+      setIsStreamPaused(true);
+    }
+  };
 
   const handleSendMessage = async (promptText: string) => {
     if (!user) {
@@ -149,6 +206,11 @@ function MainContent() {
       setChatError('Vui lòng chọn mô hình AI để bắt đầu chat.');
       return;
     }
+
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+    isPausedRef.current = false;
+    setIsStreamPaused(false);
 
     setSendingMessage(true);
     setChatError(null);
@@ -174,9 +236,17 @@ function MainContent() {
         session_id: activeSessionId || undefined,
         model_id: selectedModelId,
         prompt: promptText,
+        enable_thinking: thinkingEnabled,
       },
       {
-        onChunk: (chunk) => {
+        onChunk: async (chunk) => {
+          // If paused, wait until user resumes or cancels
+          if (isPausedRef.current) {
+            await new Promise<void>((resolve) => {
+              pauseResolverRef.current = resolve;
+            });
+          }
+
           if (chunk.type === 'thinking') {
             accumulatedThinking += chunk.text;
             setStreamingData({
@@ -202,16 +272,23 @@ function MainContent() {
           setMessages((prev) => [...prev, res.message]);
           setStreamingData(null);
           setSendingMessage(false);
+          setIsStreamPaused(false);
+          abortControllerRef.current = null;
 
           const updatedModels = await api.getAvailableModels();
           setAvailableModels(updatedModels.models || []);
         },
         onError: (errStr) => {
-          setChatError(errStr);
+          if (!errStr.includes('abort') && !errStr.includes('The user aborted')) {
+            setChatError(errStr);
+          }
           setStreamingData(null);
           setSendingMessage(false);
+          setIsStreamPaused(false);
+          abortControllerRef.current = null;
         },
-      }
+      },
+      abortController.signal
     );
   };
 
@@ -258,7 +335,7 @@ function MainContent() {
             onCloseMobile={() => setSidebarMobileOpen(false)}
           />
 
-          {/* Chat Window with Dropdown & Streaming Performance */}
+          {/* Chat Window with Dropdown, Thinking Toggle, Pause, and Cancel */}
           <ChatWindow
             messages={messages}
             loading={sendingMessage || loadingMessages}
@@ -272,6 +349,11 @@ function MainContent() {
             errorMsg={chatError}
             onClearError={() => setChatError(null)}
             streamingData={streamingData}
+            onCancelStream={handleCancelStream}
+            onTogglePauseStream={handleTogglePauseStream}
+            isStreamPaused={isStreamPaused}
+            thinkingEnabled={thinkingEnabled}
+            onToggleThinking={() => setThinkingEnabled((prev) => !prev)}
           />
         </div>
       )}

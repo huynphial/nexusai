@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { initDatabase } from './src/server/db';
+import { logger } from './src/server/logger';
 import authRoutes from './src/server/routes/authRoutes';
 import userRoutes from './src/server/routes/userRoutes';
 import groupRoutes from './src/server/routes/groupRoutes';
@@ -21,6 +22,18 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// HTTP Request logging middleware to full_yyyy-mm-dd.log
+app.use((req, res, next) => {
+  if (req.originalUrl.startsWith('/api')) {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      logger.info('HTTP', `${req.method} ${req.originalUrl} - ${res.statusCode} (${duration}ms) - IP: ${req.ip || '127.0.0.1'}`);
+    });
+  }
+  next();
+});
 
 // Initialize Database schema and seed data
 initDatabase();

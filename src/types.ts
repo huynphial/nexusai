@@ -14,6 +14,8 @@ export interface UserGroup {
   id: number;
   name: string;
   description: string;
+  default_model_id?: number | null;
+  default_model_name?: string | null;
   created_at?: string;
   member_count?: number;
   access_rules?: GroupModelAccess[];
@@ -56,6 +58,7 @@ export interface ModelWithQuota extends AIModel {
   max_tokens_per_user?: number;
   allowed?: boolean;
   disallow_reason?: string;
+  is_default?: boolean;
   quota?: {
     user_requests: number;
     user_tokens: number;

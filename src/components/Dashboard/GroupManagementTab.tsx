@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { UserGroup, AIModel, GroupModelAccess } from '../../types';
-import { Plus, Edit2, Trash2, Shield, Sliders, CheckSquare, Square, Zap, Clock } from 'lucide-react';
+import { Plus, Edit2, Trash2, Shield, Sliders, CheckSquare, Square, Zap, Clock, Star } from 'lucide-react';
 
 interface Props {
   groups: UserGroup[];
@@ -22,6 +22,7 @@ export const GroupManagementTab: React.FC<Props> = ({
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [defaultModelId, setDefaultModelId] = useState<number | null>(null);
   // Access rules matrix mapping model_id -> rule
   const [accessRulesMap, setAccessRulesMap] = useState<Record<number, GroupModelAccess>>({});
   const [loading, setLoading] = useState(false);
@@ -30,6 +31,7 @@ export const GroupManagementTab: React.FC<Props> = ({
     setEditingGroup(null);
     setName('');
     setDescription('');
+    setDefaultModelId(allModels[0]?.id || null);
     // Default matrix with all active models enabled
     const initialMap: Record<number, GroupModelAccess> = {};
     allModels.forEach((m) => {
@@ -50,6 +52,7 @@ export const GroupManagementTab: React.FC<Props> = ({
     setEditingGroup(g);
     setName(g.name);
     setDescription(g.description || '');
+    setDefaultModelId(g.default_model_id || null);
 
     const currentMap: Record<number, GroupModelAccess> = {};
     if (g.access_rules) {
@@ -105,12 +108,14 @@ export const GroupManagementTab: React.FC<Props> = ({
         await onUpdateGroup(editingGroup.id, {
           name,
           description,
+          default_model_id: defaultModelId,
           access_rules: rulesArray,
         });
       } else {
         await onCreateGroup({
           name,
           description,
+          default_model_id: defaultModelId,
           access_rules: rulesArray,
         });
       }
@@ -213,6 +218,15 @@ export const GroupManagementTab: React.FC<Props> = ({
                   )}
                 </div>
 
+                {/* Default Model Badge */}
+                <div className="mt-2 text-[11px] flex items-center gap-1.5 text-slate-700 dark:text-slate-300 font-medium bg-slate-50 dark:bg-slate-800/60 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700/60">
+                  <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />
+                  <span>Model mặc định:</span>
+                  <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                    {g.default_model_name || allModels.find((m) => m.id === g.default_model_id)?.name || 'Chưa thiết lập'}
+                  </span>
+                </div>
+
                 <p className="text-xs text-slate-600 dark:text-slate-400 mt-2 line-clamp-2">
                   {g.description || 'Chưa có mô tả cho nhóm này.'}
                 </p>
@@ -290,6 +304,31 @@ export const GroupManagementTab: React.FC<Props> = ({
                   rows={2}
                   className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl"
                 />
+              </div>
+
+              {/* Default Model Selector */}
+              <div>
+                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1 flex items-center gap-1.5">
+                  <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                  <span>Mô hình AI Mặc định (Tự động chọn khi người dùng trong nhóm tạo phiên chat mới)</span>
+                </label>
+                <select
+                  value={defaultModelId || ''}
+                  onChange={(e) => setDefaultModelId(e.target.value ? Number(e.target.value) : null)}
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-medium text-slate-800 dark:text-slate-100 focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="">-- Không chọn (Người dùng tự chọn thủ công) --</option>
+                  {allModels
+                    .filter((m) => !!accessRulesMap[m.id])
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        ⭐ {m.name} ({m.model_identifier})
+                      </option>
+                    ))}
+                </select>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
+                  Chỉ những mô hình được bật phân quyền trong ma trận bên dưới mới có thể gán làm mô hình mặc định.
+                </p>
               </div>
 
               {/* Rate Limit Matrix Section */}

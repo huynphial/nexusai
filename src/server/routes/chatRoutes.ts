@@ -31,6 +31,9 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
       [groupId]
     );
 
+    const group = await getOne(`SELECT default_model_id FROM user_groups WHERE id = ?`, [groupId]);
+    const defaultModelId = group?.default_model_id || null;
+
     const modelsWithQuota = [];
     for (const m of models) {
       const quotaCheck = await checkRateLimitAndQuota(userId!, groupId, m.id);
@@ -40,13 +43,14 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
         timeout_seconds: m.timeout_seconds || 60,
         enable_stream: m.enable_stream ?? 1,
         enable_thinking: m.enable_thinking ?? 1,
+        is_default: m.id === defaultModelId,
         quota: quotaCheck.usage,
         allowed: quotaCheck.allowed,
         disallow_reason: quotaCheck.reason
       });
     }
 
-    res.json({ models: modelsWithQuota });
+    res.json({ models: modelsWithQuota, default_model_id: defaultModelId });
   } catch (err: any) {
     logger.error('ChatRoute', 'Get available models error', err);
     res.status(500).json({ error: 'Không thể lấy danh sách mô hình AI được phân quyền.' });
@@ -160,7 +164,7 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
   const userId = req.user?.id!;
   const userEmail = req.user?.email!;
   const groupId = req.user?.user_group_id!;
-  const { session_id, model_id, prompt } = req.body;
+  const { session_id, model_id, prompt, enable_thinking } = req.body;
 
   if (!prompt || !prompt.trim()) {
     return res.status(400).json({ error: 'Nội dung tin nhắn không được để trống.' });
@@ -184,6 +188,10 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
   const modelConfig = await getOne(`SELECT * FROM ai_models WHERE id = ? AND is_active = 1`, [targetModelId]);
   if (!modelConfig) {
     return res.status(404).json({ error: 'Mô hình AI này hiện không khả dụng.' });
+  }
+
+  if (enable_thinking !== undefined) {
+    modelConfig.enable_thinking = enable_thinking ? 1 : 0;
   }
 
   // Rate limit check
@@ -301,7 +309,7 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     const userId = req.user?.id!;
     const userEmail = req.user?.email!;
     const groupId = req.user?.user_group_id!;
-    const { session_id, model_id, prompt } = req.body;
+    const { session_id, model_id, prompt, enable_thinking } = req.body;
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Nội dung tin nhắn không được để trống.' });
@@ -325,6 +333,10 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     const modelConfig = await getOne(`SELECT * FROM ai_models WHERE id = ? AND is_active = 1`, [targetModelId]);
     if (!modelConfig) {
       return res.status(404).json({ error: 'Mô hình AI này hiện không khả dụng hoặc đã bị ngưng hoạt động.' });
+    }
+
+    if (enable_thinking !== undefined) {
+      modelConfig.enable_thinking = enable_thinking ? 1 : 0;
     }
 
     // Rate Limit Check
