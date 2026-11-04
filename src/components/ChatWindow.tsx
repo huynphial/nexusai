@@ -18,6 +18,11 @@ import {
   Pause,
   Play,
   Square,
+  Copy,
+  Check,
+  RotateCcw,
+  Edit2,
+  X,
 } from 'lucide-react';
 
 interface Props {
@@ -54,6 +59,9 @@ export const ChatWindow: React.FC<Props> = ({
   onToggleThinking,
 }) => {
   const [prompt, setPrompt] = useState('');
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [editingMsgId, setEditingMsgId] = useState<number | null>(null);
+  const [editingContent, setEditingContent] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -76,6 +84,48 @@ export const ChatWindow: React.FC<Props> = ({
       e.preventDefault();
       handleSubmit(e);
     }
+  };
+
+  const handleCopy = async (id: number, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => {
+        setCopiedId((prev) => (prev === id ? null : prev));
+      }, 1800);
+    } catch (err) {
+      console.error('Failed to copy to clipboard', err);
+    }
+  };
+
+  const handleRetry = (botMsg: ChatMessage) => {
+    if (loading) return;
+    const idx = messages.findIndex((m) => m.id === botMsg.id);
+    let targetPrompt = '';
+    for (let i = idx - 1; i >= 0; i--) {
+      if (messages[i].sender === 'user') {
+        targetPrompt = messages[i].content;
+        break;
+      }
+    }
+    if (!targetPrompt) {
+      const lastUser = [...messages].reverse().find((m) => m.sender === 'user');
+      targetPrompt = lastUser?.content || '';
+    }
+    if (targetPrompt) {
+      onSendMessage(targetPrompt);
+    }
+  };
+
+  const handleStartEdit = (userMsg: ChatMessage) => {
+    setEditingMsgId(userMsg.id);
+    setEditingContent(userMsg.content);
+  };
+
+  const handleSaveEdit = (newText: string) => {
+    if (!newText.trim() || loading) return;
+    setEditingMsgId(null);
+    onSendMessage(newText.trim());
   };
 
   const examplePrompts = [
@@ -216,7 +266,70 @@ export const ChatWindow: React.FC<Props> = ({
                   }`}
                 >
                   {isUser ? (
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{m.content}</p>
+                    editingMsgId === m.id ? (
+                      <div className="space-y-2 min-w-[240px] sm:min-w-[320px]">
+                        <textarea
+                          value={editingContent}
+                          onChange={(e) => setEditingContent(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSaveEdit(editingContent);
+                            } else if (e.key === 'Escape') {
+                              setEditingMsgId(null);
+                            }
+                          }}
+                          rows={3}
+                          className="w-full text-xs sm:text-sm p-2 rounded-xl bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-400 focus:outline-hidden focus:ring-1 focus:ring-white resize-none"
+                          autoFocus
+                        />
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setEditingMsgId(null)}
+                            className="p-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-indigo-200 hover:text-white transition-colors cursor-pointer"
+                            title="Hủy"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSaveEdit(editingContent)}
+                            disabled={!editingContent.trim() || loading}
+                            className="p-1.5 rounded-lg bg-white text-indigo-700 hover:bg-indigo-50 transition-colors shadow-xs cursor-pointer disabled:opacity-50"
+                            title="Gửi lại"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-sm leading-relaxed whitespace-pre-wrap">{m.content}</p>
+                        <div className="mt-2 pt-1.5 border-t border-indigo-500/30 flex items-center justify-end gap-1 text-indigo-200">
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(m.id, m.content)}
+                            className="p-1 rounded-lg hover:bg-indigo-700/80 text-indigo-200 hover:text-white transition-colors cursor-pointer"
+                            title="Sao chép"
+                          >
+                            {copiedId === m.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-300" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleStartEdit(m)}
+                            className="p-1 rounded-lg hover:bg-indigo-700/80 text-indigo-200 hover:text-white transition-colors cursor-pointer"
+                            title="Chỉnh sửa"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )
                   ) : (
                     <>
                       {/* Thinking / Reasoning Box (if model produced thinking) */}
@@ -226,8 +339,8 @@ export const ChatWindow: React.FC<Props> = ({
 
                       <MarkdownViewer content={m.content} />
 
-                      {/* Performance Metrics: Duration, Token Speed, Total Tokens */}
-                      <div className="mt-3 pt-2 border-t border-slate-200/80 dark:border-slate-700/60 flex flex-wrap items-center justify-between gap-y-1 gap-x-3 text-[10px] text-slate-500 dark:text-slate-400 font-mono">
+                      {/* Performance Metrics & Action Buttons (Pure icon buttons, no text) */}
+                      <div className="mt-3 pt-2 border-t border-slate-200/80 dark:border-slate-700/60 flex flex-wrap items-center justify-between gap-y-1.5 gap-x-3 text-[10px] text-slate-500 dark:text-slate-400 font-mono">
                         <div className="flex items-center flex-wrap gap-2.5">
                           {m.latency_ms !== undefined && m.latency_ms > 0 && (
                             <span className="flex items-center gap-1 text-slate-600 dark:text-slate-300" title="Thời gian xử lý câu trả lời">
@@ -251,9 +364,35 @@ export const ChatWindow: React.FC<Props> = ({
                           )}
                         </div>
 
-                        <span className="text-[9px] text-slate-400">
-                          {new Date(m.created_at).toLocaleTimeString()}
-                        </span>
+                        {/* Action Buttons: Copy & Retry (Pure icon buttons, no text) */}
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(m.id, m.content)}
+                            className="p-1 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 transition-colors cursor-pointer"
+                            title="Sao chép câu trả lời"
+                          >
+                            {copiedId === m.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-500" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleRetry(m)}
+                            disabled={loading}
+                            className="p-1 rounded-md text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 transition-colors disabled:opacity-40 cursor-pointer"
+                            title="Tạo lại câu trả lời"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          </button>
+
+                          <span className="text-[9px] text-slate-400 ml-1">
+                            {new Date(m.created_at).toLocaleTimeString()}
+                          </span>
+                        </div>
                       </div>
                     </>
                   )}
