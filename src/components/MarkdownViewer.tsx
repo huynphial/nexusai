@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Check, Copy } from 'lucide-react';
 
 interface Props {
   content: string;
@@ -13,18 +12,26 @@ export const MarkdownViewer: React.FC<Props> = ({ content }) => {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          pre({ children }) {
+            return (
+              <pre className="not-prose my-2 p-2.5 rounded-xl bg-slate-200/50 dark:bg-slate-900/60 text-slate-800 dark:text-slate-200 border border-slate-300/50 dark:border-slate-800 font-mono text-xs leading-relaxed overflow-x-auto whitespace-pre-wrap break-words">
+                {children}
+              </pre>
+            );
+          },
           code({ inline, className, children, ...props }: any) {
-            const match = /language-(\w+)/.exec(className || '');
-            const codeString = String(children).replace(/\n$/, '');
-
-            if (!inline) {
-              return <CodeBlock language={match ? match[1] : ''} code={codeString} />;
+            if (inline) {
+              return (
+                <code
+                  className="not-prose bg-slate-200/50 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 font-mono text-xs px-1.5 py-0.5 rounded border border-slate-300/40 dark:border-slate-700/50 font-medium"
+                  {...props}
+                >
+                  {children}
+                </code>
+              );
             }
             return (
-              <code
-                className="bg-slate-100 dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 font-mono text-xs px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-medium"
-                {...props}
-              >
+              <code className="font-mono text-xs text-slate-800 dark:text-slate-200" {...props}>
                 {children}
               </code>
             );
@@ -63,43 +70,6 @@ export const MarkdownViewer: React.FC<Props> = ({ content }) => {
       >
         {content}
       </ReactMarkdown>
-    </div>
-  );
-};
-
-const CodeBlock = ({ language, code }: { language: string; code: string }) => {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="relative my-3 rounded-lg overflow-hidden border border-slate-800 bg-slate-950 font-mono text-xs shadow-md">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900 border-b border-slate-800 text-slate-400 font-sans">
-        <span className="text-[11px] font-semibold text-indigo-400 tracking-wide uppercase">{language || 'code'}</span>
-        <button
-          onClick={handleCopy}
-          className="flex items-center gap-1 text-[11px] hover:text-white px-2 py-0.5 rounded bg-slate-800/80 hover:bg-slate-700 transition-colors"
-        >
-          {copied ? (
-            <>
-              <Check className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="text-emerald-400 font-medium">Đã sao chép</span>
-            </>
-          ) : (
-            <>
-              <Copy className="w-3.5 h-3.5" />
-              <span>Sao chép</span>
-            </>
-          )}
-        </button>
-      </div>
-      <pre className="p-3 overflow-x-auto text-slate-200 leading-relaxed font-mono">
-        <code>{code}</code>
-      </pre>
     </div>
   );
 };
