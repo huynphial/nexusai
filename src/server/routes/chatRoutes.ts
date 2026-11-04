@@ -20,7 +20,8 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
 
     const models = await query(
       `
-      SELECT m.id, m.name, m.provider, m.model_identifier, m.system_prompt, m.is_active,
+      SELECT m.id, m.name, m.provider, m.model_identifier, m.system_prompt,
+             m.timeout_seconds, m.enable_stream, m.enable_thinking, m.is_active,
              gma.rate_limit_period, gma.rate_limit_requests, gma.max_tokens_group, gma.max_tokens_per_user
       FROM ai_models m
       JOIN group_model_access gma ON m.id = gma.model_id
@@ -36,6 +37,9 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
       modelsWithQuota.push({
         ...m,
         system_prompt: m.system_prompt || '',
+        timeout_seconds: m.timeout_seconds || 60,
+        enable_stream: m.enable_stream ?? 1,
+        enable_thinking: m.enable_thinking ?? 1,
         quota: quotaCheck.usage,
         allowed: quotaCheck.allowed,
         disallow_reason: quotaCheck.reason
@@ -86,7 +90,7 @@ router.post('/sessions', async (req: CustomRequest, res: Response) => {
       return res.status(404).json({ error: 'Mô hình AI không hợp lệ.' });
     }
 
-    const sessionTitle = title ? title.trim() : `Cuộc trò chuyện mới - ${model.name}`;
+    const sessionTitle = title ? title.trim() : `Trò chuyện mới - ${model.name}`;
     const result = await run(
       `INSERT INTO chat_sessions (user_id, model_id, title) VALUES (?, ?, ?)`,
       [userId, model_id, sessionTitle]
@@ -139,7 +143,11 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
       return res.status(404).json({ error: 'Không tìm thấy cuộc trò chuyện.' });
     }
 
-    const messages = await query(`SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id ASC`, [sessionId]);
+    const messages = await query(
+      `SELECT id, session_id, sender, content, thinking_content, tokens_used, latency_ms, tokens_per_second, created_at
+       FROM chat_messages WHERE session_id = ? ORDER BY id ASC`,
+      [sessionId]
+    );
 
     res.json({ messages });
   } catch (err: any) {
@@ -147,7 +155,147 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
   }
 });
 
-// Send message to LLM with Rate Limit & Token Limit enforcement
+// Stream message to LLM using Server-Sent Events (SSE)
+router.post('/stream', async (req: CustomRequest, res: Response) => {
+  const userId = req.user?.id!;
+  const userEmail = req.user?.email!;
+  const groupId = req.user?.user_group_id!;
+  const { session_id, model_id, prompt } = req.body;
+
+  if (!prompt || !prompt.trim()) {
+    return res.status(400).json({ error: 'Nội dung tin nhắn không được để trống.' });
+  }
+
+  let currentSessionId = session_id;
+  let targetModelId = model_id;
+
+  if (currentSessionId) {
+    const session = await getOne(`SELECT * FROM chat_sessions WHERE id = ? AND user_id = ?`, [currentSessionId, userId]);
+    if (!session) {
+      return res.status(404).json({ error: 'Không tìm thấy phiên trò chuyện này.' });
+    }
+    targetModelId = session.model_id;
+  } else {
+    if (!targetModelId) {
+      return res.status(400).json({ error: 'Vui lòng chỉ định mô hình AI.' });
+    }
+  }
+
+  const modelConfig = await getOne(`SELECT * FROM ai_models WHERE id = ? AND is_active = 1`, [targetModelId]);
+  if (!modelConfig) {
+    return res.status(404).json({ error: 'Mô hình AI này hiện không khả dụng.' });
+  }
+
+  // Rate limit check
+  const limitCheck = await checkRateLimitAndQuota(userId, groupId, targetModelId);
+  if (!limitCheck.allowed) {
+    await logger.audit(
+      userId,
+      userEmail,
+      'RATE_LIMIT_BLOCKED',
+      `Chặn truy vấn stream do vượt quá Quota: ${limitCheck.reason}`,
+      req.ip
+    );
+    return res.status(429).json({
+      error: limitCheck.reason || 'Đã vượt quá giới hạn truy cập.',
+      usage: limitCheck.usage
+    });
+  }
+
+  // Setup Server-Sent Events (SSE) headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  if (!currentSessionId) {
+    const autoTitle = prompt.trim().substring(0, 30) + (prompt.trim().length > 30 ? '...' : '');
+    const newSessionRes = await run(
+      `INSERT INTO chat_sessions (user_id, model_id, title) VALUES (?, ?, ?)`,
+      [userId, targetModelId, autoTitle]
+    );
+    currentSessionId = newSessionRes.lastID;
+  }
+
+  // Save user prompt
+  await run(
+    `INSERT INTO chat_messages (session_id, sender, content, tokens_used) VALUES (?, 'user', ?, 0)`,
+    [currentSessionId, prompt.trim()]
+  );
+
+  const history = await query(
+    `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 10`,
+    [currentSessionId]
+  );
+  history.reverse();
+
+  try {
+    const aiResult = await generateAIChatResponse(
+      modelConfig,
+      history,
+      (chunk) => {
+        // Send chunk to client via SSE
+        res.write(`data: ${JSON.stringify({ type: chunk.type, text: chunk.text })}\n\n`);
+      }
+    );
+
+    // Save assistant message to database with thinking content & performance metrics
+    const assistantMsgRes = await run(
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?)`,
+      [
+        currentSessionId,
+        aiResult.content,
+        aiResult.thinking_content || null,
+        aiResult.tokensUsed,
+        aiResult.latency_ms,
+        aiResult.tokens_per_second
+      ]
+    );
+
+    await logTokenUsage(userId, groupId, targetModelId, aiResult.tokensUsed);
+    await run(`UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [currentSessionId]);
+
+    await logger.audit(
+      userId,
+      userEmail,
+      'STREAM_LLM_PROMPT',
+      `Hoàn thành stream tới ${modelConfig.name} (${aiResult.tokensUsed} tokens, ${aiResult.latency_ms}ms, ${aiResult.tokens_per_second} tk/s)`,
+      req.ip
+    );
+
+    const updatedQuota = await checkRateLimitAndQuota(userId, groupId, targetModelId);
+
+    const finalMessage = {
+      id: assistantMsgRes.lastID,
+      session_id: currentSessionId,
+      sender: 'assistant',
+      content: aiResult.content,
+      thinking_content: aiResult.thinking_content || null,
+      tokens_used: aiResult.tokensUsed,
+      latency_ms: aiResult.latency_ms,
+      tokens_per_second: aiResult.tokens_per_second,
+      created_at: new Date().toISOString()
+    };
+
+    res.write(`data: ${JSON.stringify({
+      type: 'done',
+      session_id: currentSessionId,
+      message: finalMessage,
+      updated_quota: updatedQuota.usage
+    })}\n\n`);
+
+    res.end();
+  } catch (err: any) {
+    logger.error('ChatRoute', 'Stream error', err);
+    res.write(`data: ${JSON.stringify({ type: 'error', error: err.message || 'Lỗi khi stream từ AI.' })}\n\n`);
+    res.end();
+  }
+});
+
+// Send message to LLM (non-streaming fallback)
 router.post('/send', async (req: CustomRequest, res: Response) => {
   try {
     const userId = req.user?.id!;
@@ -219,8 +367,16 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     const aiResult = await generateAIChatResponse(modelConfig, history);
 
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, tokens_used) VALUES (?, 'assistant', ?, ?)`,
-      [currentSessionId, aiResult.content, aiResult.tokensUsed]
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?)`,
+      [
+        currentSessionId,
+        aiResult.content,
+        aiResult.thinking_content || null,
+        aiResult.tokensUsed,
+        aiResult.latency_ms,
+        aiResult.tokens_per_second
+      ]
     );
 
     await logTokenUsage(userId, groupId, targetModelId, aiResult.tokensUsed);
@@ -230,7 +386,7 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
       userId,
       userEmail,
       'SEND_LLM_PROMPT',
-      `Gửi yêu cầu tới ${modelConfig.name} (${aiResult.tokensUsed} tokens tiêu thụ)`,
+      `Gửi yêu cầu tới ${modelConfig.name} (${aiResult.tokensUsed} tokens, ${aiResult.latency_ms}ms, ${aiResult.tokens_per_second} tk/s)`,
       req.ip
     );
 
@@ -243,7 +399,10 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
         session_id: currentSessionId,
         sender: 'assistant',
         content: aiResult.content,
+        thinking_content: aiResult.thinking_content || null,
         tokens_used: aiResult.tokensUsed,
+        latency_ms: aiResult.latency_ms,
+        tokens_per_second: aiResult.tokens_per_second,
         created_at: new Date().toISOString()
       },
       updated_quota: updatedQuota.usage

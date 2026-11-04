@@ -136,6 +136,9 @@ export async function initDatabase() {
         api_url TEXT,
         api_token TEXT,
         system_prompt TEXT,
+        timeout_seconds INTEGER DEFAULT 60,
+        enable_stream INTEGER DEFAULT 1,
+        enable_thinking INTEGER DEFAULT 1,
         is_active INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -174,7 +177,10 @@ export async function initDatabase() {
         session_id INTEGER NOT NULL,
         sender TEXT NOT NULL,
         content TEXT NOT NULL,
+        thinking_content TEXT,
         tokens_used INTEGER DEFAULT 0,
+        latency_ms INTEGER DEFAULT 0,
+        tokens_per_second REAL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -204,6 +210,35 @@ export async function initDatabase() {
       )
     `);
 
+    // Schema dynamic migrations for existing database
+    try {
+      const modelCols = await query(`PRAGMA table_info(ai_models)`);
+      const modelColNames = modelCols.map((c: any) => c.name);
+      if (!modelColNames.includes('timeout_seconds')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN timeout_seconds INTEGER DEFAULT 60`);
+      }
+      if (!modelColNames.includes('enable_stream')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN enable_stream INTEGER DEFAULT 1`);
+      }
+      if (!modelColNames.includes('enable_thinking')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN enable_thinking INTEGER DEFAULT 1`);
+      }
+
+      const msgCols = await query(`PRAGMA table_info(chat_messages)`);
+      const msgColNames = msgCols.map((c: any) => c.name);
+      if (!msgColNames.includes('thinking_content')) {
+        await run(`ALTER TABLE chat_messages ADD COLUMN thinking_content TEXT`);
+      }
+      if (!msgColNames.includes('latency_ms')) {
+        await run(`ALTER TABLE chat_messages ADD COLUMN latency_ms INTEGER DEFAULT 0`);
+      }
+      if (!msgColNames.includes('tokens_per_second')) {
+        await run(`ALTER TABLE chat_messages ADD COLUMN tokens_per_second REAL DEFAULT 0`);
+      }
+    } catch (migErr) {
+      console.warn('[Database] Column migration notice:', migErr);
+    }
+
     await seedDefaults();
     console.log('[Database] WebAssembly SQLite schema initialization & seed complete.');
   } catch (err) {
@@ -212,38 +247,55 @@ export async function initDatabase() {
 }
 
 async function seedDefaults() {
-  const existingGroups = await query(`SELECT COUNT(*) as count FROM user_groups`);
-  let execGroupId = 1;
-  let rdGroupId = 2;
-  let generalGroupId = 3;
-
-  if (existingGroups[0].count === 0) {
-    const res1 = await run(`INSERT INTO user_groups (name, description) VALUES (?, ?)`, [
-      'Ban Giám Đốc (Executive)',
-      'Quyền hạn tối đa, truy cập tất cả các mô hình cao cấp với hạn ngạch token lớn.'
-    ]);
-    execGroupId = res1.lastID;
-
-    const res2 = await run(`INSERT INTO user_groups (name, description) VALUES (?, ?)`, [
-      'Phòng R&D & Tech',
-      'Truy cập GPT-4o, DeepSeek và Gemini để nghiên cứu và phát triển phần mềm.'
-    ]);
-    rdGroupId = res2.lastID;
-
-    const res3 = await run(`INSERT INTO user_groups (name, description) VALUES (?, ?)`, [
-      'Nhân Viên General',
-      'Nhóm người dùng phổ thông, truy cập các mô hình gọn nhẹ GPT-4o Mini & Gemini Flash.'
-    ]);
-    generalGroupId = res3.lastID;
+  // Ensure the 2 simplified groups exist: Nhóm Quản Trị (Admin) & Nhóm Người Dùng (User)
+  let adminGroup = await getOne(`SELECT * FROM user_groups WHERE name LIKE '%Quản Trị%' OR name LIKE '%Admin%' LIMIT 1`);
+  if (!adminGroup) {
+    const res = await run(
+      `INSERT INTO user_groups (name, description) VALUES (?, ?)`,
+      [
+        'Nhóm Quản Trị (Admin)',
+        'Quyền quản trị toàn diện hệ thống Local AI, toàn quyền truy cập Dashboard, cấu hình mô hình, hạn ngạch và chat.'
+      ]
+    );
+    adminGroup = { id: res.lastID, name: 'Nhóm Quản Trị (Admin)' };
   } else {
-    const groups = await query(`SELECT id, name FROM user_groups`);
-    const exec = groups.find((g: any) => g.name.includes('Giám Đốc'));
-    const rd = groups.find((g: any) => g.name.includes('R&D'));
-    const gen = groups.find((g: any) => g.name.includes('General'));
-    if (exec) execGroupId = exec.id;
-    if (rd) rdGroupId = rd.id;
-    if (gen) generalGroupId = gen.id;
+    await run(
+      `UPDATE user_groups SET name = ?, description = ? WHERE id = ?`,
+      [
+        'Nhóm Quản Trị (Admin)',
+        'Quyền quản trị toàn diện hệ thống Local AI, toàn quyền truy cập Dashboard, cấu hình mô hình, hạn ngạch và chat.',
+        adminGroup.id
+      ]
+    );
   }
+
+  let userGroup = await getOne(`SELECT * FROM user_groups WHERE (name LIKE '%Người Dùng%' OR name LIKE '%User%' OR name LIKE '%General%') AND id != ? LIMIT 1`, [adminGroup.id]);
+  if (!userGroup) {
+    const res = await run(
+      `INSERT INTO user_groups (name, description) VALUES (?, ?)`,
+      [
+        'Nhóm Người Dùng (User)',
+        'Nhóm người dùng thông thường, chỉ được phép sử dụng giao diện Chat LLM với các mô hình được phân quyền, không truy cập giao diện quản trị.'
+      ]
+    );
+    userGroup = { id: res.lastID, name: 'Nhóm Người Dùng (User)' };
+  } else {
+    await run(
+      `UPDATE user_groups SET name = ?, description = ? WHERE id = ?`,
+      [
+        'Nhóm Người Dùng (User)',
+        'Nhóm người dùng thông thường, chỉ được phép sử dụng giao diện Chat LLM với các mô hình được phân quyền, không truy cập giao diện quản trị.',
+        userGroup.id
+      ]
+    );
+  }
+
+  // Remove any redundant legacy groups beyond the 2 standard groups
+  await run(`DELETE FROM user_groups WHERE id NOT IN (?, ?)`, [adminGroup.id, userGroup.id]);
+
+  // Synchronize existing users: admin role -> adminGroup, user role -> userGroup
+  await run(`UPDATE users SET user_group_id = ? WHERE role = 'admin'`, [adminGroup.id]);
+  await run(`UPDATE users SET user_group_id = ? WHERE role = 'user' OR role IS NULL`, [userGroup.id]);
 
   const existingUsers = await query(`SELECT COUNT(*) as count FROM users`);
   if (existingUsers[0].count === 0) {
@@ -255,29 +307,29 @@ async function seedDefaults() {
     await run(`
       INSERT INTO users (name, email, password_hash, role, user_group_id, status)
       VALUES (?, ?, ?, ?, ?, ?)
-    `, ['System Admin', adminEmail, hashedAdminPass, 'admin', execGroupId, 'active']);
+    `, ['System Admin', adminEmail, hashedAdminPass, 'admin', adminGroup.id, 'active']);
   }
 
   const existingModels = await query(`SELECT COUNT(*) as count FROM ai_models`);
   if (existingModels[0].count === 0) {
     const geminiRes = await run(`
-      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
+      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, 60, 1, 1, 1)
     `, [
-      'Gemini 3.8 Flash (Tích hợp)',
+      'Gemini 3.8 Flash',
       'gemini',
       'gemini-3.8-flash',
       '',
       '',
-      'Bạn là trợ lý AI thông minh NexusAI, hỗ trợ người dùng giải quyết công việc chuyên nghiệp, chu đáo bằng Tiếng Việt.'
+      'Bạn là trợ lý trí tuệ nhân tạo Local AI, hỗ trợ người dùng giải quyết công việc chuyên nghiệp, chu đáo bằng Tiếng Việt.'
     ]);
     const geminiModelId = geminiRes.lastID;
 
     const gpt4oRes = await run(`
-      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
+      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, 120, 1, 1, 1)
     `, [
-      'ChatGPT GPT-4o (OpenAI Compatible)',
+      'GPT-4o',
       'openai_compatible',
       'gpt-4o',
       'https://api.openai.com/v1',
@@ -287,10 +339,10 @@ async function seedDefaults() {
     const gpt4oModelId = gpt4oRes.lastID;
 
     const gpt4oMiniRes = await run(`
-      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
+      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, 60, 1, 0, 1)
     `, [
-      'ChatGPT GPT-4o Mini',
+      'GPT-4o Mini',
       'openai_compatible',
       'gpt-4o-mini',
       'https://api.openai.com/v1',
@@ -300,28 +352,41 @@ async function seedDefaults() {
     const gpt4oMiniModelId = gpt4oMiniRes.lastID;
 
     const deepseekRes = await run(`
-      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
+      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, 120, 1, 1, 1)
     `, [
-      'DeepSeek Chat (OpenAI Format)',
+      'DeepSeek R1 / Chat',
       'openai_compatible',
       'deepseek-chat',
       'https://api.deepseek.com/v1',
       '',
-      'Bạn là mô hình suy luận chuyên sâu DeepSeek Chat. Hãy tập trung giải quyết bài toán lập trình và logic.'
+      'Bạn là mô hình suy luận chuyên sâu DeepSeek. Hãy phân tích kỹ lưỡng các bài toán và phản hồi rõ ràng.'
     ]);
     const deepseekModelId = deepseekRes.lastID;
 
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [execGroupId, geminiModelId, 'day', 5000, 2000000, 500000]);
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [execGroupId, gpt4oModelId, 'day', 5000, 2000000, 500000]);
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [execGroupId, gpt4oMiniModelId, 'day', 10000, 5000000, 1000000]);
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [execGroupId, deepseekModelId, 'day', 5000, 2000000, 500000]);
+    // Assign to Admin Group (Generous Quota)
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [adminGroup.id, geminiModelId, 'day', 10000, 10000000, 2000000]);
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [adminGroup.id, gpt4oModelId, 'day', 10000, 10000000, 2000000]);
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [adminGroup.id, gpt4oMiniModelId, 'day', 20000, 20000000, 5000000]);
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [adminGroup.id, deepseekModelId, 'day', 10000, 10000000, 2000000]);
 
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [rdGroupId, geminiModelId, 'day', 500, 500000, 100000]);
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [rdGroupId, deepseekModelId, 'day', 500, 500000, 100000]);
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [rdGroupId, gpt4oModelId, 'day', 200, 200000, 50000]);
-
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [generalGroupId, geminiModelId, 'day', 200, 200000, 30000]);
-    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [generalGroupId, gpt4oMiniModelId, 'day', 100, 100000, 20000]);
+    // Assign to User Group (Standard Quota)
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [userGroup.id, geminiModelId, 'day', 1000, 1000000, 200000]);
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [userGroup.id, gpt4oModelId, 'day', 500, 500000, 100000]);
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [userGroup.id, gpt4oMiniModelId, 'day', 2000, 2000000, 300000]);
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, ?, ?, ?, ?)`, [userGroup.id, deepseekModelId, 'day', 500, 500000, 100000]);
+  } else {
+    // If models exist, ensure all active models are assigned to both Admin and User group if not already
+    const allModels = await query(`SELECT id FROM ai_models`);
+    for (const m of allModels) {
+      const adminHas = await getOne(`SELECT id FROM group_model_access WHERE group_id = ? AND model_id = ?`, [adminGroup.id, m.id]);
+      if (!adminHas) {
+        await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, 'day', 10000, 10000000, 2000000)`, [adminGroup.id, m.id]);
+      }
+      const userHas = await getOne(`SELECT id FROM group_model_access WHERE group_id = ? AND model_id = ?`, [userGroup.id, m.id]);
+      if (!userHas) {
+        await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, 'day', 1000, 1000000, 200000)`, [userGroup.id, m.id]);
+      }
+    }
   }
 }

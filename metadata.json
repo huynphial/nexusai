@@ -1,6 +1,6 @@
 {
-  "name": "NexusAI - LLM Chat & Management Portal",
-  "description": "Nền tảng Quản lý Chat LLM, Quản lý Nhóm người dùng, Phân quyền Model & Giới hạn Rate Limit / Token đa tầng.",
+  "name": "Local AI - LLM Chat & Management Portal",
+  "description": "Nền tảng Quản trị & Chat LLM Nội bộ, hỗ trợ streaming, thinking, quản lý nhóm và kiểm soát hạn ngạch đa tầng.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

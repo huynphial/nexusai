@@ -147,50 +147,75 @@ export const GroupManagementTab: React.FC<Props> = ({
 
       {/* Groups List Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {groups.map((g) => (
-          <div
-            key={g.id}
-            className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-2xs flex flex-col justify-between space-y-4"
-          >
-            <div>
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-xl bg-purple-500/10 text-purple-600 dark:text-purple-400 flex items-center justify-center font-bold">
-                    <Shield className="w-4 h-4" />
+        {groups.map((g) => {
+          const isAdminGroup = g.name.toLowerCase().includes('admin') || g.name.toLowerCase().includes('quản trị');
+          return (
+            <div
+              key={g.id}
+              className={`bg-white dark:bg-slate-900 border rounded-2xl p-5 shadow-2xs flex flex-col justify-between space-y-4 ${
+                isAdminGroup
+                  ? 'border-amber-300/80 dark:border-amber-900/50'
+                  : 'border-slate-200 dark:border-slate-800'
+              }`}
+            >
+              <div>
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center font-bold ${
+                      isAdminGroup
+                        ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                        : 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400'
+                    }`}>
+                      <Shield className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-sm text-slate-900 dark:text-slate-100">{g.name}</h4>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                        {g.member_count || 0} thành viên
+                      </span>
+                    </div>
                   </div>
-                  <div>
-                    <h4 className="font-bold text-sm text-slate-900 dark:text-slate-100">{g.name}</h4>
-                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                      {g.member_count || 0} thành viên
+
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handleOpenEdit(g)}
+                      className="p-1.5 text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                      title="Chỉnh sửa phân quyền mô hình & Quota"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    {!isAdminGroup && (
+                      <button
+                        onClick={() => {
+                          if (confirm(`Bạn có chắc chắn muốn xóa nhóm "${g.name}" không?`)) {
+                            onDeleteGroup(g.id);
+                          }
+                        }}
+                        className="p-1.5 text-slate-500 hover:text-red-600 dark:hover:text-red-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                        title="Xóa nhóm"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Clear Privilege Badge */}
+                <div className="mt-2.5">
+                  {isAdminGroup ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-700 dark:text-amber-400 font-bold border border-amber-500/20 text-[10px]">
+                      👑 Quyền Quản Trị: Vào Dashboard Quản Trị & Chat LLM
                     </span>
-                  </div>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 font-bold border border-indigo-500/20 text-[10px]">
+                      💬 Quyền Người Dùng: Chỉ được phép Chat LLM
+                    </span>
+                  )}
                 </div>
 
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => handleOpenEdit(g)}
-                    className="p-1.5 text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                    title="Chỉnh sửa nhóm & Phân quyền"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (confirm(`Bạn có chắc chắn muốn xóa nhóm "${g.name}" không?`)) {
-                        onDeleteGroup(g.id);
-                      }
-                    }}
-                    className="p-1.5 text-slate-500 hover:text-red-600 dark:hover:text-red-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                    title="Xóa nhóm"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              <p className="text-xs text-slate-600 dark:text-slate-400 mt-3 line-clamp-2">
-                {g.description || 'Chưa có mô tả cho nhóm này.'}
-              </p>
+                <p className="text-xs text-slate-600 dark:text-slate-400 mt-2 line-clamp-2">
+                  {g.description || 'Chưa có mô tả cho nhóm này.'}
+                </p>
 
               {/* Assigned Models Matrix List */}
               <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
@@ -228,8 +253,9 @@ export const GroupManagementTab: React.FC<Props> = ({
               </div>
             </div>
           </div>
-        ))}
-      </div>
+        );
+      })}
+    </div>
 
       {/* Group Create/Edit Modal with Matrix */}
       {isModalOpen && (

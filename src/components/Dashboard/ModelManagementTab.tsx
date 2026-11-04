@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AIModel } from '../../types';
-import { Plus, Edit2, Trash2, Cpu, Key, Globe, Terminal, CheckCircle, XCircle } from 'lucide-react';
+import { Plus, Edit2, Trash2, Cpu, Key, Globe, Terminal, CheckCircle, XCircle, Clock, Radio, Brain } from 'lucide-react';
 
 interface Props {
   models: AIModel[];
@@ -24,6 +24,9 @@ export const ModelManagementTab: React.FC<Props> = ({
   const [apiUrl, setApiUrl] = useState('');
   const [apiToken, setApiToken] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [timeoutSeconds, setTimeoutSeconds] = useState<number>(60);
+  const [enableStream, setEnableStream] = useState<boolean>(true);
+  const [enableThinking, setEnableThinking] = useState<boolean>(true);
   const [isActive, setIsActive] = useState<boolean>(true);
   const [loading, setLoading] = useState(false);
 
@@ -34,7 +37,10 @@ export const ModelManagementTab: React.FC<Props> = ({
     setModelIdentifier('gpt-4o');
     setApiUrl('https://api.openai.com/v1');
     setApiToken('');
-    setSystemPrompt('Bạn là trợ lý AI thông minh, hỗ trợ xử lý công việc bằng Tiếng Việt.');
+    setSystemPrompt('Bạn là trợ lý trí tuệ nhân tạo Local AI, hỗ trợ người dùng chu đáo bằng Tiếng Việt.');
+    setTimeoutSeconds(60);
+    setEnableStream(true);
+    setEnableThinking(true);
     setIsActive(true);
     setIsModalOpen(true);
   };
@@ -47,6 +53,9 @@ export const ModelManagementTab: React.FC<Props> = ({
     setApiUrl(m.api_url || '');
     setApiToken(m.masked_token || '');
     setSystemPrompt(m.system_prompt || '');
+    setTimeoutSeconds(m.timeout_seconds || 60);
+    setEnableStream(m.enable_stream === 1 || m.enable_stream === true || m.enable_stream === undefined);
+    setEnableThinking(m.enable_thinking === 1 || m.enable_thinking === true || m.enable_thinking === undefined);
     setIsActive(m.is_active === 1 || m.is_active === true);
     setIsModalOpen(true);
   };
@@ -59,26 +68,23 @@ export const ModelManagementTab: React.FC<Props> = ({
 
     setLoading(true);
     try {
+      const payload = {
+        name,
+        provider,
+        model_identifier: modelIdentifier,
+        api_url: apiUrl,
+        api_token: apiToken,
+        system_prompt: systemPrompt,
+        timeout_seconds: timeoutSeconds,
+        enable_stream: enableStream ? 1 : 0,
+        enable_thinking: enableThinking ? 1 : 0,
+        is_active: isActive,
+      };
+
       if (editingModel) {
-        await onUpdateModel(editingModel.id, {
-          name,
-          provider,
-          model_identifier: modelIdentifier,
-          api_url: apiUrl,
-          api_token: apiToken,
-          system_prompt: systemPrompt,
-          is_active: isActive,
-        });
+        await onUpdateModel(editingModel.id, payload);
       } else {
-        await onCreateModel({
-          name,
-          provider,
-          model_identifier: modelIdentifier,
-          api_url: apiUrl,
-          api_token: apiToken,
-          system_prompt: systemPrompt,
-          is_active: isActive,
-        });
+        await onCreateModel(payload);
       }
       setIsModalOpen(false);
     } catch (err: any) {
@@ -91,14 +97,14 @@ export const ModelManagementTab: React.FC<Props> = ({
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800">
         <div>
           <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
             <Cpu className="w-4 h-4 text-indigo-500" />
-            <span>Khai Báo AI Token & Mô Hình Chat Tương Thích ChatGPT</span>
+            <span>Khai Báo Mô Hình, Timeout, Stream & Thinking (Local AI)</span>
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Admin khai báo AI Token (OpenAI, DeepSeek, OpenRouter) kèm theo System Prompt mặc định cho từng Model.
+            Cấu hình thời gian chờ tối đa (Timeout) ngăn lỗi treo API, cơ chế Stream thời gian thực và trích xuất quá trình suy luận (Thinking).
           </p>
         </div>
 
@@ -118,9 +124,9 @@ export const ModelManagementTab: React.FC<Props> = ({
             <thead>
               <tr className="bg-slate-50 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 font-semibold border-b border-slate-200 dark:border-slate-800">
                 <th className="p-3">Tên Mô Hình</th>
-                <th className="p-3">Loại Provider</th>
                 <th className="p-3">Mã Model (ID)</th>
-                <th className="p-3">Endpoint Base URL</th>
+                <th className="p-3">Thời Gian Chờ (Timeout)</th>
+                <th className="p-3">Tính Năng</th>
                 <th className="p-3">Trạng Thái Token</th>
                 <th className="p-3">Kích Hoạt</th>
                 <th className="p-3 text-center">Hành Động</th>
@@ -136,20 +142,35 @@ export const ModelManagementTab: React.FC<Props> = ({
               ) : (
                 models.map((m) => (
                   <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                    <td className="p-3 font-bold text-slate-900 dark:text-slate-100">{m.name}</td>
-                    <td className="p-3 font-mono text-[11px]">
-                      <span className="px-2 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400 font-semibold">
-                        {m.provider}
-                      </span>
+                    <td className="p-3 font-bold text-slate-900 dark:text-slate-100">
+                      {m.name}
+                      <span className="block text-[10px] text-slate-400 font-normal">{m.provider}</span>
                     </td>
                     <td className="p-3 font-mono text-indigo-600 dark:text-indigo-400 font-semibold">{m.model_identifier}</td>
-                    <td className="p-3 font-mono text-slate-500 dark:text-slate-400 max-w-[200px] truncate">
-                      {m.api_url || '(Sử dụng Gemini Server)'}
+                    <td className="p-3">
+                      <span className="inline-flex items-center gap-1 font-mono text-xs px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 font-bold border border-amber-500/20">
+                        <Clock className="w-3 h-3 text-amber-500" />
+                        {m.timeout_seconds || 60}s
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {m.enable_stream !== 0 && (
+                          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-medium border border-emerald-500/20">
+                            <Radio className="w-2.5 h-2.5" /> Stream
+                          </span>
+                        )}
+                        {m.enable_thinking !== 0 && (
+                          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400 font-medium border border-purple-500/20">
+                            <Brain className="w-2.5 h-2.5" /> Thinking
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="p-3">
                       {m.provider === 'gemini' ? (
                         <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold">
-                          Tích hợp sẵn Gemini
+                          Tích hợp sẵn SDK
                         </span>
                       ) : m.has_token ? (
                         <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
@@ -157,7 +178,7 @@ export const ModelManagementTab: React.FC<Props> = ({
                         </span>
                       ) : (
                         <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 font-semibold">
-                          Chưa nhập Token (Demo Mode)
+                          Chưa có Token (Demo Mode)
                         </span>
                       )}
                     </td>
@@ -213,7 +234,7 @@ export const ModelManagementTab: React.FC<Props> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-3 text-xs">
+            <form onSubmit={handleSubmit} className="space-y-3.5 text-xs">
               <div>
                 <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Tên Mô Hình hiển thị</label>
                 <input
@@ -221,7 +242,7 @@ export const ModelManagementTab: React.FC<Props> = ({
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Ví dụ: ChatGPT GPT-4o Open Chat"
+                  placeholder="Ví dụ: GPT-4o hoặc DeepSeek R1"
                   className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl"
                 />
               </div>
@@ -234,9 +255,9 @@ export const ModelManagementTab: React.FC<Props> = ({
                     onChange={(e: any) => setProvider(e.target.value)}
                     className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl"
                   >
-                    <option value="openai_compatible">OpenAI Compatible (ChatGPT)</option>
-                    <option value="gemini">Gemini Server SDK</option>
-                    <option value="custom">Custom REST Proxy</option>
+                    <option value="openai_compatible">OpenAI Compatible (ChatGPT/DeepSeek/vLLM)</option>
+                    <option value="gemini">Gemini SDK</option>
+                    <option value="custom">Custom Proxy</option>
                   </select>
                 </div>
 
@@ -247,9 +268,56 @@ export const ModelManagementTab: React.FC<Props> = ({
                     required
                     value={modelIdentifier}
                     onChange={(e) => setModelIdentifier(e.target.value)}
-                    placeholder="gpt-4o / gpt-4o-mini / deepseek-chat"
+                    placeholder="gpt-4o / deepseek-chat"
                     className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl font-mono"
                   />
+                </div>
+              </div>
+
+              {/* Timeout & Execution settings */}
+              <div className="p-3 bg-slate-50 dark:bg-slate-950/60 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Thời gian chờ tối đa & Cơ chế xử lý</span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] text-slate-600 dark:text-slate-400 mb-1">
+                    Thời gian chờ tối đa (Timeout theo giây):
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={5}
+                      max={600}
+                      value={timeoutSeconds}
+                      onChange={(e) => setTimeoutSeconds(Number(e.target.value))}
+                      className="w-32 p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs"
+                    />
+                    <span className="text-slate-500 text-[11px]">giây (Mặc định: 60s, đề xuất: 120s cho mô hình lớn/suy luận)</span>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex flex-col gap-2 border-t border-slate-200/60 dark:border-slate-800">
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={enableStream}
+                      onChange={(e) => setEnableStream(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span>Bật Stream câu trả lời thời gian thực (Server-Sent Events)</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={enableThinking}
+                      onChange={(e) => setEnableThinking(e.target.checked)}
+                      className="rounded text-purple-600 focus:ring-purple-500"
+                    />
+                    <span>Bật hiển thị quá trình suy luận (Thinking / Reasoning Box)</span>
+                  </label>
                 </div>
               </div>
 
@@ -275,9 +343,6 @@ export const ModelManagementTab: React.FC<Props> = ({
                       placeholder="sk-..."
                       className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl font-mono"
                     />
-                    <p className="text-[10px] text-slate-400 mt-1">
-                      Token được lưu mã hóa an toàn trên cơ sở dữ liệu backend.
-                    </p>
                   </div>
                 </>
               )}
@@ -287,7 +352,7 @@ export const ModelManagementTab: React.FC<Props> = ({
                 <textarea
                   value={systemPrompt}
                   onChange={(e) => setSystemPrompt(e.target.value)}
-                  rows={3}
+                  rows={2}
                   placeholder="Khai báo chỉ dẫn hệ thống cho Mô hình AI..."
                   className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs"
                 />

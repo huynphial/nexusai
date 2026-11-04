@@ -65,52 +65,36 @@ export const Sidebar: React.FC<Props> = ({
             <span>Tạo Cuộc Trò Chuyện Mới</span>
           </button>
 
-          {/* Model Selector Pill list */}
+          {/* Clean Dropdown Model Selector */}
           <div className="mt-1">
-            <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1 flex items-center justify-between px-1">
+            <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1.5 flex items-center justify-between px-0.5">
               <span className="flex items-center gap-1">
-                <Cpu className="w-3 h-3 text-indigo-500" />
-                Mô hình được phân quyền ({availableModels.length})
+                <Cpu className="w-3.5 h-3.5 text-indigo-500" />
+                <span>Mô hình AI</span>
               </span>
               <span className="text-[10px] text-slate-400">{user?.group_name}</span>
             </label>
 
             {availableModels.length === 0 ? (
-              <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-600 dark:text-amber-400 text-[11px]">
-                Chưa gán mô hình cho nhóm {user?.group_name || 'này'}. Liên hệ Admin.
+              <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-600 dark:text-amber-400 text-[11px]">
+                Chưa gán mô hình cho nhóm {user?.group_name || 'này'}.
               </div>
             ) : (
-              <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
-                {availableModels.map((m) => {
-                  const isSelected = m.id === selectedModelId;
-                  const isBlocked = !m.allowed;
-
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => {
-                        onSelectModel(m.id);
-                      }}
-                      className={`w-full text-left p-2 rounded-lg text-xs font-medium transition-all flex items-center justify-between ${
-                        isSelected
-                          ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-xs border border-indigo-200 dark:border-indigo-900/50 font-semibold'
-                          : 'text-slate-700 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-900'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 truncate">
-                        {isBlocked ? (
-                          <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                        ) : (
-                          <Zap className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-indigo-500' : 'text-slate-400'}`} />
-                        )}
-                        <span className="truncate">{m.name}</span>
-                      </div>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 uppercase font-mono text-[9px] shrink-0">
-                        {m.provider === 'gemini' ? 'Gemini' : 'ChatGPT'}
-                      </span>
-                    </button>
-                  );
-                })}
+              <div className="relative">
+                <select
+                  value={selectedModelId || ''}
+                  onChange={(e) => onSelectModel(Number(e.target.value))}
+                  className="w-full text-xs font-semibold pl-3 pr-8 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-100 shadow-2xs focus:outline-hidden focus:ring-2 focus:ring-indigo-500 appearance-none cursor-pointer"
+                >
+                  {availableModels.map((m) => (
+                    <option key={m.id} value={m.id} disabled={!m.allowed}>
+                      {m.name} {!m.allowed ? '(Hết hạn ngạch)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2.5 text-slate-400">
+                  <ChevronRight className="w-4 h-4 rotate-90" />
+                </div>
               </div>
             )}
           </div>

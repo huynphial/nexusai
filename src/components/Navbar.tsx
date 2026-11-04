@@ -34,11 +34,11 @@ export const Navbar: React.FC<Props> = ({
           <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 via-indigo-500 to-purple-500 flex items-center justify-center text-white shadow-md shadow-indigo-500/20">
             <Bot className="w-5 h-5" />
           </div>
-          <span>NexusAI</span>
+          <span>Local AI</span>
         </a>
       </div>
 
-      {/* Zone 2: 4-5 single-line text links */}
+      {/* Zone 2: Navigation links */}
       <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
         <button
           onClick={() => setActiveView('chat')}
@@ -52,7 +52,7 @@ export const Navbar: React.FC<Props> = ({
           <span>Giao diện Chat LLM</span>
         </button>
 
-        {user && (
+        {user && user.role === 'admin' && (
           <button
             onClick={() => setActiveView('dashboard')}
             className={`flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${

@@ -35,7 +35,7 @@ app.use('/api/dashboard', dashboardRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'NexusAI LLM Server', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'Local AI Server', timestamp: new Date().toISOString() });
 });
 
 // Configure Vite integration for Development vs Production

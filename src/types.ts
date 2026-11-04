@@ -29,6 +29,9 @@ export interface AIModel {
   masked_token?: string;
   has_token?: boolean;
   system_prompt?: string;
+  timeout_seconds?: number;
+  enable_stream?: number | boolean;
+  enable_thinking?: number | boolean;
   is_active: number | boolean;
   created_at?: string;
 }
@@ -81,7 +84,10 @@ export interface ChatMessage {
   session_id: number;
   sender: 'user' | 'assistant' | 'system';
   content: string;
+  thinking_content?: string;
   tokens_used: number;
+  latency_ms?: number;
+  tokens_per_second?: number;
   created_at: string;
 }
 

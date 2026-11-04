@@ -130,6 +130,15 @@ function MainContent() {
     }
   };
 
+  const [streamingData, setStreamingData] = useState<{ content: string; thinking?: string; isThinking?: boolean } | null>(null);
+
+  // If user role is not admin, keep in chat view
+  useEffect(() => {
+    if (user && user.role !== 'admin' && activeView === 'dashboard') {
+      setActiveView('chat');
+    }
+  }, [user, activeView]);
+
   const handleSendMessage = async (promptText: string) => {
     if (!user) {
       setIsLoginModalOpen(true);
@@ -143,6 +152,7 @@ function MainContent() {
 
     setSendingMessage(true);
     setChatError(null);
+    setStreamingData({ content: '', thinking: '', isThinking: true });
 
     // Optimistic user message append
     const tempUserMsg: ChatMessage = {
@@ -156,31 +166,53 @@ function MainContent() {
 
     setMessages((prev) => [...prev, tempUserMsg]);
 
-    try {
-      const res = await api.sendMessage({
+    let accumulatedContent = '';
+    let accumulatedThinking = '';
+
+    await api.streamMessage(
+      {
         session_id: activeSessionId || undefined,
         model_id: selectedModelId,
         prompt: promptText,
-      });
+      },
+      {
+        onChunk: (chunk) => {
+          if (chunk.type === 'thinking') {
+            accumulatedThinking += chunk.text;
+            setStreamingData({
+              content: accumulatedContent,
+              thinking: accumulatedThinking,
+              isThinking: true,
+            });
+          } else {
+            accumulatedContent += chunk.text;
+            setStreamingData({
+              content: accumulatedContent,
+              thinking: accumulatedThinking,
+              isThinking: false,
+            });
+          }
+        },
+        onDone: async (res) => {
+          if (!activeSessionId && res.session_id) {
+            setActiveSessionId(res.session_id);
+            const updatedSessions = await api.getSessions();
+            setSessions(updatedSessions.sessions || []);
+          }
+          setMessages((prev) => [...prev, res.message]);
+          setStreamingData(null);
+          setSendingMessage(false);
 
-      // Update session list if new session was created
-      if (!activeSessionId && res.session_id) {
-        setActiveSessionId(res.session_id);
-        const updatedSessions = await api.getSessions();
-        setSessions(updatedSessions.sessions || []);
+          const updatedModels = await api.getAvailableModels();
+          setAvailableModels(updatedModels.models || []);
+        },
+        onError: (errStr) => {
+          setChatError(errStr);
+          setStreamingData(null);
+          setSendingMessage(false);
+        },
       }
-
-      // Append assistant response
-      setMessages((prev) => [...prev, res.message]);
-
-      // Refresh available models to reflect updated live token quota
-      const updatedModels = await api.getAvailableModels();
-      setAvailableModels(updatedModels.models || []);
-    } catch (err: any) {
-      setChatError(err.message || 'Lỗi khi xử lý câu hỏi với AI.');
-    } finally {
-      setSendingMessage(false);
-    }
+    );
   };
 
   const selectedModelObj = availableModels.find((m) => m.id === selectedModelId);
@@ -197,7 +229,7 @@ function MainContent() {
       />
 
       {/* Main Workspace Body */}
-      {activeView === 'dashboard' && user ? (
+      {activeView === 'dashboard' && user?.role === 'admin' ? (
         <DashboardMain />
       ) : (
         <div className="flex-1 flex overflow-hidden relative">
@@ -226,14 +258,20 @@ function MainContent() {
             onCloseMobile={() => setSidebarMobileOpen(false)}
           />
 
-          {/* Chat Window */}
+          {/* Chat Window with Dropdown & Streaming Performance */}
           <ChatWindow
             messages={messages}
             loading={sendingMessage || loadingMessages}
             onSendMessage={handleSendMessage}
+            availableModels={availableModels}
             selectedModel={selectedModelObj}
+            onSelectModel={(id) => {
+              setSelectedModelId(id);
+              setChatError(null);
+            }}
             errorMsg={chatError}
             onClearError={() => setChatError(null)}
+            streamingData={streamingData}
           />
         </div>
       )}

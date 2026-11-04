@@ -87,6 +87,72 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  streamMessage: async (
+    data: { session_id?: number; model_id?: number; prompt: string },
+    callbacks: {
+      onChunk: (chunk: { type: 'thinking' | 'content'; text: string }) => void;
+      onDone: (res: { session_id: number; message: ChatMessage; updated_quota?: any }) => void;
+      onError: (err: string) => void;
+    }
+  ) => {
+    const token = localStorage.getItem('nexus_jwt_token');
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    try {
+      const response = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(data),
+      });
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || `HTTP ${response.status}`);
+      }
+
+      if (!response.body) {
+        throw new Error('No readable stream response body');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          try {
+            const parsed = JSON.parse(trimmed.substring(6));
+            if (parsed.type === 'thinking' || parsed.type === 'content') {
+              callbacks.onChunk(parsed);
+            } else if (parsed.type === 'done') {
+              callbacks.onDone(parsed);
+            } else if (parsed.type === 'error') {
+              callbacks.onError(parsed.error);
+            }
+          } catch (e) {
+            // ignore partial json
+          }
+        }
+      }
+    } catch (err: any) {
+      callbacks.onError(err.message || 'Lỗi kết nối stream.');
+    }
+  },
+
   // Dashboard
   getDashboardStats: () => request<DashboardStats>('/dashboard/stats'),
   getAuditLogs: () => request<{ audit_logs: import('./types').AuditLog[] }>('/dashboard/audit-logs'),

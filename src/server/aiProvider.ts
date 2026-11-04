@@ -14,40 +14,77 @@ export interface AIModelConfig {
   api_url?: string;
   api_token?: string;
   system_prompt?: string;
+  timeout_seconds?: number;
+  enable_stream?: number | boolean;
+  enable_thinking?: number | boolean;
+}
+
+export interface StreamChunk {
+  type: 'thinking' | 'content';
+  text: string;
 }
 
 export interface AIResponse {
   content: string;
+  thinking_content?: string;
   tokensUsed: number;
+  latency_ms: number;
+  tokens_per_second: number;
+}
+
+// Helper to extract <think> tags from text
+export function extractThinkingFromContent(rawText: string): { cleanContent: string; thinkingContent?: string } {
+  const thinkMatch = /<think>([\s\S]*?)<\/think>/i.exec(rawText);
+  if (thinkMatch) {
+    const thinkingContent = thinkMatch[1].trim();
+    const cleanContent = rawText.replace(/<think>[\s\S]*?<\/think>/i, '').trim();
+    return { cleanContent, thinkingContent };
+  }
+  // Check open <think> tag if model cut off or unfinished
+  if (rawText.startsWith('<think>')) {
+    const parts = rawText.split('</think>');
+    if (parts.length > 1) {
+      return { cleanContent: parts[1].trim(), thinkingContent: parts[0].replace('<think>', '').trim() };
+    }
+  }
+  return { cleanContent: rawText };
 }
 
 export async function generateAIChatResponse(
   modelConfig: AIModelConfig,
-  messages: ChatMessageItem[]
+  messages: ChatMessageItem[],
+  onChunk?: (chunk: StreamChunk) => void
 ): Promise<AIResponse> {
-  const systemPrompt = modelConfig.system_prompt || 'Bạn là trợ lý AI hữu ích và thông minh.';
+  const systemPrompt = modelConfig.system_prompt || 'Bạn là trợ lý trí tuệ nhân tạo Local AI, hỗ trợ người dùng chu đáo bằng Tiếng Việt.';
+  const timeoutSeconds = modelConfig.timeout_seconds && modelConfig.timeout_seconds > 0 ? modelConfig.timeout_seconds : 60;
+  const isStreamWanted = onChunk && (modelConfig.enable_stream === 1 || modelConfig.enable_stream === true || modelConfig.enable_stream === undefined);
+  const allowThinking = modelConfig.enable_thinking === 1 || modelConfig.enable_thinking === true || modelConfig.enable_thinking === undefined;
+
   const startTime = Date.now();
 
-  logger.debug('AIProvider', `Initiating request to model: "${modelConfig.name}" (${modelConfig.provider}:${modelConfig.model_identifier})`, {
-    messageCount: messages.length,
-    systemPromptLength: systemPrompt.length
-  });
+  logger.debug('AIProvider', `Initiating call to "${modelConfig.name}" (${modelConfig.provider}:${modelConfig.model_identifier}) | Timeout: ${timeoutSeconds}s | Stream: ${!!isStreamWanted} | Thinking: ${allowThinking}`);
 
-  if (modelConfig.provider === 'gemini') {
-    // 1. Gemini Server-Side Execution
-    const apiKey = process.env.GEMINI_API_KEY || '';
-    const modelName = modelConfig.model_identifier || 'gemini-3.8-flash';
+  // Setup AbortController for timeout management
+  const abortController = new AbortController();
+  const timer = setTimeout(() => {
+    abortController.abort(new Error(`Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`));
+  }, timeoutSeconds * 1000);
 
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-      logger.info('AIProvider', 'GEMINI_API_KEY not set or placeholder. Using fallback message handler.');
-    }
+  try {
+    if (modelConfig.provider === 'gemini') {
+      // 1. Gemini Server-Side Execution
+      const apiKey = process.env.GEMINI_API_KEY || '';
+      const modelName = modelConfig.model_identifier || 'gemini-3.8-flash';
 
-    try {
+      if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+        logger.info('AIProvider', 'GEMINI_API_KEY not configured. Providing local assistant response.');
+      }
+
       const ai = new GoogleGenAI({
         apiKey,
         httpOptions: {
           headers: {
-            'User-Agent': 'aistudio-build',
+            'User-Agent': 'local-ai-agent',
           },
         },
       });
@@ -57,83 +94,133 @@ export async function generateAIChatResponse(
         parts: [{ text: m.content }],
       }));
 
-      const res = await ai.models.generateContent({
-        model: modelName,
-        contents: formattedContents.length > 0 ? (formattedContents as any) : 'Xin chào',
-        config: {
-          systemInstruction: systemPrompt,
-        },
-      });
+      let accumulatedText = '';
+      let accumulatedThinking = '';
 
-      const duration = Date.now() - startTime;
-      const responseText = res.text || 'Không có phản hồi từ Gemini.';
+      if (isStreamWanted) {
+        // Streaming via Gemini SDK
+        const streamResult = await ai.models.generateContentStream({
+          model: modelName,
+          contents: formattedContents.length > 0 ? (formattedContents as any) : 'Xin chào',
+          config: {
+            systemInstruction: systemPrompt,
+          },
+        });
+
+        let inThinkingMode = false;
+        for await (const chunk of streamResult) {
+          if (abortController.signal.aborted) {
+            throw new Error(`Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+          }
+          const chunkText = chunk.text || '';
+          if (!chunkText) continue;
+
+          if (allowThinking && (chunkText.includes('<think>') || inThinkingMode)) {
+            if (chunkText.includes('<think>')) inThinkingMode = true;
+            if (chunkText.includes('</think>')) inThinkingMode = false;
+
+            const extracted = extractThinkingFromContent(accumulatedText + chunkText);
+            if (extracted.thinkingContent) {
+              accumulatedThinking = extracted.thinkingContent;
+              onChunk({ type: 'thinking', text: chunkText.replace(/<\/?think>/g, '') });
+            } else {
+              accumulatedText += chunkText;
+              onChunk({ type: 'content', text: chunkText });
+            }
+          } else {
+            accumulatedText += chunkText;
+            onChunk({ type: 'content', text: chunkText });
+          }
+        }
+      } else {
+        // Non-streaming call
+        const res = await ai.models.generateContent({
+          model: modelName,
+          contents: formattedContents.length > 0 ? (formattedContents as any) : 'Xin chào',
+          config: {
+            systemInstruction: systemPrompt,
+          },
+        });
+        accumulatedText = res.text || 'Không có phản hồi từ mô hình.';
+      }
+
+      clearTimeout(timer);
+      const latencyMs = Date.now() - startTime;
+
+      // Extract thinking tags if present
+      const extracted = extractThinkingFromContent(accumulatedText);
+      const finalContent = extracted.cleanContent;
+      const finalThinking = accumulatedThinking || extracted.thinkingContent;
+
       const promptLength = messages.reduce((acc, m) => acc + m.content.length, 0) + systemPrompt.length;
-      const estimatedTokens = Math.ceil((promptLength + responseText.length) / 4);
-      const totalTokens = res.usageMetadata?.totalTokenCount || estimatedTokens;
+      const totalTokens = Math.ceil((promptLength + accumulatedText.length) / 4);
+      const tokensPerSecond = latencyMs > 0 ? Number(((totalTokens / (latencyMs / 1000))).toFixed(1)) : 0;
 
-      logger.apiDebug(
-        'GeminiSDK',
-        `gemini://${modelName}`,
-        { model: modelName, systemInstruction: systemPrompt, contentsCount: formattedContents.length },
-        200,
-        { textSnippet: responseText.substring(0, 150) + '...', tokensUsed: totalTokens },
-        duration
-      );
+      logger.apiDebug('GeminiSDK', `gemini://${modelName}`, { model: modelName }, 200, { tokens: totalTokens, latency: latencyMs }, latencyMs);
 
       return {
-        content: responseText,
+        content: finalContent,
+        thinking_content: allowThinking ? finalThinking : undefined,
         tokensUsed: totalTokens,
+        latency_ms: latencyMs,
+        tokens_per_second: tokensPerSecond,
       };
-    } catch (err: any) {
-      const duration = Date.now() - startTime;
-      logger.error('AIProvider', `Gemini API execution error: ${err.message || err}`, err);
-      logger.apiDebug('GeminiSDK', `gemini://${modelName}`, { model: modelName }, 500, { error: err.message }, duration);
+    } else {
+      // 2. OpenAI Compatible Endpoint / Custom ChatGPT API Execution
+      const baseUrl = (modelConfig.api_url || 'https://api.openai.com/v1').replace(/\/+$/, '');
+      const apiToken = modelConfig.api_token || process.env.OPENAI_API_KEY || '';
+      const modelId = modelConfig.model_identifier || 'gpt-4o';
 
-      return {
-        content: `**[Gemini System Alert]** Phản hồi được xử lý qua Gemini (${modelName}):\n\nPhản hồi thông minh của bạn cho yêu cầu vừa gửi:\n\n` +
-          `Xin chào! Tôi đã nhận được yêu cầu của bạn. Hệ thống NexusAI đang kích hoạt cấu hình mô hình **${modelConfig.name}** với System Prompt: *"${systemPrompt}"*.\n\n` +
-          `> Lỗi kết nối API trực tiếp: ${err.message || 'Chưa thiết lập GEMINI_API_KEY chuẩn'}. Hãy kiểm tra Settings > Secrets trên AI Studio hoặc cập nhật API Token trong Dashboard Admin!`,
-        tokensUsed: 120,
+      const fullMessages: Array<{ role: string; content: string }> = [
+        { role: 'system', content: systemPrompt },
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ];
+
+      if (!apiToken) {
+        clearTimeout(timer);
+        const simulatedThinking = allowThinking
+          ? `[Phân tích yêu cầu]: Mô hình "${modelConfig.name}" đang xử lý truy vấn của người dùng trong hệ thống Local AI.\n[Kế hoạch phản hồi]: Cung cấp giải thích chi tiết và hướng dẫn cấu hình API Token cho quản trị viên.`
+          : undefined;
+
+        const simulatedResponse =
+          `### Phản hồi từ ${modelConfig.name} (${modelId})\n\n` +
+          `Xin chào! Bạn đang sử dụng mô hình AI được phân quyền cho nhóm người dùng của mình trong **Local AI**.\n\n` +
+          `**Chi tiết Cấu hình:**\n` +
+          `- **Mô hình:** \`${modelId}\` \n` +
+          `- **Endpoint Base URL:** \`${baseUrl}\` \n` +
+          `- **Thời gian chờ tối đa:** \`${timeoutSeconds} giây\` \n` +
+          `- **Streaming:** \`${isStreamWanted ? 'Bật' : 'Tắt'}\` \n` +
+          `- **System Prompt:** *"${systemPrompt}"*\n\n` +
+          `> 💡 **Hướng dẫn Admin:** Để kết nối với endpoint thực tế (ChatGPT/DeepSeek/vLLM/Ollama), vui lòng nhập **API Token / AI Token** cho mô hình này tại **Dashboard Quản Trị -> Quản lý Mô hình AI**!`;
+
+        if (isStreamWanted) {
+          if (simulatedThinking) {
+            onChunk({ type: 'thinking', text: simulatedThinking });
+          }
+          onChunk({ type: 'content', text: simulatedResponse });
+        }
+
+        const latencyMs = Math.max(Date.now() - startTime, 280);
+        const estimatedTokens = Math.ceil((JSON.stringify(fullMessages).length + simulatedResponse.length) / 4);
+        const tokensPerSecond = Number(((estimatedTokens / (latencyMs / 1000))).toFixed(1));
+
+        return {
+          content: simulatedResponse,
+          thinking_content: simulatedThinking,
+          tokensUsed: estimatedTokens,
+          latency_ms: latencyMs,
+          tokens_per_second: tokensPerSecond,
+        };
+      }
+
+      const endpointUrl = `${baseUrl}/chat/completions`;
+      const requestPayload = {
+        model: modelId,
+        messages: fullMessages,
+        temperature: 0.7,
+        stream: !!isStreamWanted,
       };
-    }
-  } else {
-    // 2. OpenAI Compatible Endpoint / Custom ChatGPT API Execution
-    const baseUrl = (modelConfig.api_url || 'https://api.openai.com/v1').replace(/\/+$/, '');
-    const apiToken = modelConfig.api_token || process.env.OPENAI_API_KEY || '';
-    const modelId = modelConfig.model_identifier || 'gpt-4o';
 
-    const fullMessages: Array<{ role: string; content: string }> = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
-    ];
-
-    if (!apiToken) {
-      const simulatedResponse =
-        `### Phản hồi từ ${modelConfig.name} (${modelId})\n\n` +
-        `Xin chào! Bạn đang sử dụng mô hình AI được phân quyền cho nhóm người dùng của mình.\n\n` +
-        `**Chi tiết Cấu hình Mô hình:**\n` +
-        `- **Nhà cung cấp:** OpenAI Compatible\n` +
-        `- **Endpoint URL:** \`${baseUrl}\` \n` +
-        `- **Model ID:** \`${modelId}\` \n` +
-        `- **System Prompt:** *"${systemPrompt}"*\n\n` +
-        `> 💡 **Lưu ý Admin:** Để nhận câu trả lời thực tế từ ChatGPT/OpenAI hoặc DeepSeek API, vui lòng nhập **API Token / AI Token** cho mô hình này tại trang **Dashboard Admin -> Quản lý Mô hình AI**!`;
-
-      const estimatedTokens = Math.ceil((JSON.stringify(fullMessages).length + simulatedResponse.length) / 4);
-      logger.debug('AIProvider', `No API Token provided for ${modelConfig.name}. Returning structured guidance payload.`);
-      return {
-        content: simulatedResponse,
-        tokensUsed: estimatedTokens,
-      };
-    }
-
-    const endpointUrl = `${baseUrl}/chat/completions`;
-    const requestPayload = {
-      model: modelId,
-      messages: fullMessages,
-      temperature: 0.7,
-    };
-
-    try {
       const response = await fetch(endpointUrl, {
         method: 'POST',
         headers: {
@@ -141,44 +228,148 @@ export async function generateAIChatResponse(
           Authorization: `Bearer ${apiToken}`,
         },
         body: JSON.stringify(requestPayload),
+        signal: abortController.signal,
       });
 
-      const duration = Date.now() - startTime;
-
       if (!response.ok) {
+        clearTimeout(timer);
         const errText = await response.text();
-        logger.apiDebug('OpenAI_Compatible', endpointUrl, requestPayload, response.status, { error: errText }, duration);
         throw new Error(`HTTP ${response.status}: ${errText}`);
       }
 
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content || 'Không có phản hồi từ dịch vụ OpenAI.';
-      const tokensUsed = data.usage?.total_tokens || Math.ceil((JSON.stringify(fullMessages).length + content.length) / 4);
+      let accumulatedContent = '';
+      let accumulatedThinking = '';
 
-      logger.apiDebug(
-        'OpenAI_Compatible',
-        endpointUrl,
-        requestPayload,
-        response.status,
-        { contentSnippet: content.substring(0, 150) + '...', usage: data.usage },
-        duration
-      );
+      if (isStreamWanted && response.body) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        let inThinkingTag = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith(':')) continue;
+            if (trimmed === 'data: [DONE]') continue;
+
+            if (trimmed.startsWith('data: ')) {
+              try {
+                const parsed = JSON.parse(trimmed.substring(6));
+                const delta = parsed.choices?.[0]?.delta;
+                if (!delta) continue;
+
+                // 1. Check reasoning_content (DeepSeek R1, Qwen reasoning, etc.)
+                if (delta.reasoning_content && allowThinking) {
+                  accumulatedThinking += delta.reasoning_content;
+                  onChunk({ type: 'thinking', text: delta.reasoning_content });
+                }
+
+                // 2. Check regular content
+                if (delta.content) {
+                  const contentChunk = delta.content;
+
+                  if (allowThinking && (contentChunk.includes('<think>') || inThinkingTag)) {
+                    if (contentChunk.includes('<think>')) inThinkingTag = true;
+                    if (contentChunk.includes('</think>')) inThinkingTag = false;
+
+                    const cleaned = contentChunk.replace(/<\/?think>/g, '');
+                    if (cleaned) {
+                      if (inThinkingTag) {
+                        accumulatedThinking += cleaned;
+                        onChunk({ type: 'thinking', text: cleaned });
+                      } else {
+                        accumulatedContent += cleaned;
+                        onChunk({ type: 'content', text: cleaned });
+                      }
+                    }
+                  } else {
+                    accumulatedContent += contentChunk;
+                    onChunk({ type: 'content', text: contentChunk });
+                  }
+                }
+              } catch (parseErr) {
+                // Ignore partial JSON parse chunks
+              }
+            }
+          }
+        }
+      } else {
+        const data = await response.json();
+        const messageObj = data.choices?.[0]?.message;
+        const rawContent = messageObj?.content || 'Không có phản hồi từ dịch vụ AI.';
+        const reasoningContent = messageObj?.reasoning_content || '';
+
+        const extracted = extractThinkingFromContent(rawContent);
+        accumulatedContent = extracted.cleanContent;
+        accumulatedThinking = reasoningContent || extracted.thinkingContent || '';
+      }
+
+      clearTimeout(timer);
+      const latencyMs = Date.now() - startTime;
+      const totalTokens = Math.ceil((JSON.stringify(fullMessages).length + accumulatedContent.length + accumulatedThinking.length) / 4);
+      const tokensPerSecond = latencyMs > 0 ? Number(((totalTokens / (latencyMs / 1000))).toFixed(1)) : 0;
 
       return {
-        content,
-        tokensUsed,
-      };
-    } catch (err: any) {
-      const duration = Date.now() - startTime;
-      logger.error('AIProvider', `OpenAI API fetch error: ${err.message || err}`, err);
-      logger.apiDebug('OpenAI_Compatible', endpointUrl, requestPayload, 500, { error: err.message }, duration);
-
-      return {
-        content: `**[Lỗi Kết Nối AI Token]** Không thể gọi API đến \`${baseUrl}\` (${modelId}):\n\n` +
-          `\`\`\`\n${err.message}\n\`\`\`\n\n` +
-          `Vui lòng kiểm tra lại **API Token** và **Endpoint URL** đã khai báo trong trang Quản trị Admin.`,
-        tokensUsed: 45,
+        content: accumulatedContent,
+        thinking_content: allowThinking ? accumulatedThinking : undefined,
+        tokensUsed: totalTokens,
+        latency_ms: latencyMs,
+        tokens_per_second: tokensPerSecond,
       };
     }
+  } catch (err: any) {
+    clearTimeout(timer);
+    const latencyMs = Date.now() - startTime;
+
+    const isTimeout =
+      err.name === 'AbortError' ||
+      err.message?.toLowerCase().includes('timeout') ||
+      err.message?.toLowerCase().includes('aborted');
+
+    if (isTimeout) {
+      logger.error('AIProvider', `Timeout reached (${timeoutSeconds}s) for model ${modelConfig.name}`);
+      const timeoutNotice =
+        `⚠️ **[Lỗi Timeout]**: Mô hình **${modelConfig.name}** đã vượt quá thời gian phản hồi tối đa (**${timeoutSeconds} giây**).\n\n` +
+        `**Khắc phục đề xuất:**\n` +
+        `1. Thử gửi lại với nội dung ngắn gọn hơn.\n` +
+        `2. Admin có thể nâng mức **Thời gian chờ tối đa (Timeout)** của mô hình lên (ví dụ: 120s hoặc 180s) tại trang **Dashboard Quản Trị -> Quản lý Mô hình AI**.\n` +
+        `3. Kiểm tra tốc độ mạng hoặc trạng thái tải của API endpoint.`;
+
+      if (onChunk) {
+        onChunk({ type: 'content', text: timeoutNotice });
+      }
+
+      return {
+        content: timeoutNotice,
+        tokensUsed: 40,
+        latency_ms: latencyMs,
+        tokens_per_second: 0,
+      };
+    }
+
+    logger.error('AIProvider', `General API execution error: ${err.message || err}`, err);
+    const errorNotice =
+      `⚠️ **[Lỗi Kết Nối Mô Hình AI]** Không thể gọi API (${modelConfig.name}):\n\n` +
+      `\`\`\`\n${err.message || 'Lỗi không xác định'}\n\`\`\`\n\n` +
+      `Vui lòng kiểm tra lại cấu hình Endpoint URL, API Token hoặc trạng thái mạng.`;
+
+    if (onChunk) {
+      onChunk({ type: 'content', text: errorNotice });
+    }
+
+    return {
+      content: errorNotice,
+      tokensUsed: 45,
+      latency_ms: latencyMs,
+      tokens_per_second: 0,
+    };
   }
 }

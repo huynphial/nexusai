@@ -34,7 +34,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
   try {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
-    const { name, provider, model_identifier, api_url, api_token, system_prompt, is_active } = req.body;
+    const { name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active } = req.body;
 
     if (!name || !provider || !model_identifier) {
       return res.status(400).json({ error: 'Vui lòng cung cấp Tên hiển thị, Provider và Mã định danh Model.' });
@@ -42,8 +42,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
 
     const result = await run(
       `
-      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         name.trim(),
@@ -52,6 +52,9 @@ router.post('/', async (req: CustomRequest, res: Response) => {
         api_url ? api_url.trim() : '',
         api_token ? api_token.trim() : '',
         system_prompt ? system_prompt.trim() : '',
+        timeout_seconds ? Number(timeout_seconds) : 60,
+        enable_stream !== undefined ? (enable_stream ? 1 : 0) : 1,
+        enable_thinking !== undefined ? (enable_thinking ? 1 : 0) : 1,
         is_active !== undefined ? (is_active ? 1 : 0) : 1
       ]
     );
@@ -60,7 +63,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
       adminId,
       adminEmail,
       'ADMIN_CREATE_MODEL',
-      `Khai báo mô hình AI mới "${name}" (${provider}:${model_identifier})`,
+      `Khai báo mô hình AI mới "${name}" (${provider}:${model_identifier}) [Timeout: ${timeout_seconds || 60}s]`,
       req.ip
     );
 
@@ -76,7 +79,7 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
     const modelId = parseInt(req.params.id, 10);
-    const { name, provider, model_identifier, api_url, api_token, system_prompt, is_active } = req.body;
+    const { name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active } = req.body;
 
     const existing = await getOne(`SELECT * FROM ai_models WHERE id = ?`, [modelId]);
     if (!existing) {
@@ -91,7 +94,8 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
     await run(
       `
       UPDATE ai_models
-      SET name = ?, provider = ?, model_identifier = ?, api_url = ?, api_token = ?, system_prompt = ?, is_active = ?
+      SET name = ?, provider = ?, model_identifier = ?, api_url = ?, api_token = ?, system_prompt = ?,
+          timeout_seconds = ?, enable_stream = ?, enable_thinking = ?, is_active = ?
       WHERE id = ?
       `,
       [
@@ -101,6 +105,9 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
         api_url !== undefined ? api_url.trim() : existing.api_url,
         updatedToken,
         system_prompt !== undefined ? system_prompt.trim() : existing.system_prompt,
+        timeout_seconds !== undefined ? Number(timeout_seconds) : (existing.timeout_seconds || 60),
+        enable_stream !== undefined ? (enable_stream ? 1 : 0) : (existing.enable_stream ?? 1),
+        enable_thinking !== undefined ? (enable_thinking ? 1 : 0) : (existing.enable_thinking ?? 1),
         is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active,
         modelId
       ]

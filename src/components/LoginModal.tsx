@@ -60,7 +60,7 @@ export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
             <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center font-bold">
               <Bot className="w-5 h-5" />
             </div>
-            <span className="font-extrabold text-lg tracking-tight">NexusAI Portal</span>
+            <span className="font-extrabold text-lg tracking-tight">Local AI Portal</span>
           </div>
 
           <h2 className="text-base font-semibold text-slate-100">
