@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from '../types';
 import { MarkdownViewer } from './MarkdownViewer';
+import { useAuth } from '../context/AuthContext';
 import {
   Send,
   Bot,
@@ -24,6 +25,7 @@ import {
   Edit2,
   X,
   Terminal,
+  Lock,
 } from 'lucide-react';
 
 interface Props {
@@ -833,6 +835,8 @@ const ProgressTimeline: React.FC<{
   summary?: ProgressSummary;
   isLive?: boolean;
 }> = ({ steps, summary, isLive = false }) => {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [isOpen, setIsOpen] = useState(true);
 
   const doneSteps = steps.filter((s) => s.status === 'done').length;
@@ -961,7 +965,14 @@ const ProgressTimeline: React.FC<{
                   {step.detail && (
                     <div className="mt-1.5">
                       {isSql ? (
-                        <SqlSnippetBox sql={step.detail} stepId={step.id || `sql-${idx}`} />
+                        isAdmin ? (
+                          <SqlSnippetBox sql={step.detail} stepId={step.id || `sql-${idx}`} />
+                        ) : (
+                          <div className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 italic font-sans">
+                            <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span>Chi tiết câu lệnh SQL chỉ dành cho tài khoản Quản trị viên (Admin).</span>
+                          </div>
+                        )
                       ) : (
                         <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed font-mono">
                           {step.detail}
