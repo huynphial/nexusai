@@ -82,6 +82,12 @@ export const logger = {
     appendToLogFile('INFO', category, message, data);
   },
 
+  warn: (category: string, message: string, data?: any) => {
+    const timestamp = formatTimestamp();
+    console.warn(`\x1b[33m[${timestamp}] [WARN] [${category}]\x1b[0m ${message}`, data ? maskSensitiveData(data) : '');
+    appendToLogFile('WARN', category, message, data);
+  },
+
   debug: (category: string, message: string, data?: any) => {
     appendToLogFile('DEBUG', category, message, data);
     if (!isDebugEnabled()) return;

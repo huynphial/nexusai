@@ -19,7 +19,7 @@ export const ModelManagementTab: React.FC<Props> = ({
   const [editingModel, setEditingModel] = useState<AIModel | null>(null);
 
   const [name, setName] = useState('');
-  const [provider, setProvider] = useState<'openai_compatible' | 'gemini' | 'custom'>('openai_compatible');
+  const [provider, setProvider] = useState<'openai_compatible' | 'gemini' | 'step_progress' | 'custom'>('openai_compatible');
   const [modelIdentifier, setModelIdentifier] = useState('');
   const [apiUrl, setApiUrl] = useState('');
   const [apiToken, setApiToken] = useState('');
@@ -144,7 +144,13 @@ export const ModelManagementTab: React.FC<Props> = ({
                   <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                     <td className="p-3 font-bold text-slate-900 dark:text-slate-100">
                       {m.name}
-                      <span className="block text-[10px] text-slate-400 font-normal">{m.provider}</span>
+                      <span className="block text-[10px] text-slate-400 font-normal">
+                        {m.provider === 'step_progress' ? (
+                          <span className="text-purple-600 dark:text-purple-400 font-semibold">⚡ Tiến độ từng bước (RAG Gateway)</span>
+                        ) : (
+                          m.provider
+                        )}
+                      </span>
                     </td>
                     <td className="p-3 font-mono text-indigo-600 dark:text-indigo-400 font-semibold">{m.model_identifier}</td>
                     <td className="p-3">
@@ -252,10 +258,18 @@ export const ModelManagementTab: React.FC<Props> = ({
                   <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Loại Provider</label>
                   <select
                     value={provider}
-                    onChange={(e: any) => setProvider(e.target.value)}
+                    onChange={(e: any) => {
+                      const newP = e.target.value;
+                      setProvider(newP);
+                      if (newP === 'step_progress' && !editingModel) {
+                        setApiUrl('http://localhost:8000/v1');
+                        setModelIdentifier('qwen3:8b');
+                      }
+                    }}
                     className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl"
                   >
                     <option value="openai_compatible">OpenAI Compatible (ChatGPT/DeepSeek/vLLM)</option>
+                    <option value="step_progress">Model Tiến Độ Từng Bước (Progress Gateway / RAG)</option>
                     <option value="gemini">Gemini SDK</option>
                     <option value="custom">Custom Proxy</option>
                   </select>

@@ -178,6 +178,7 @@ export async function initDatabase() {
         sender TEXT NOT NULL,
         content TEXT NOT NULL,
         thinking_content TEXT,
+        progress_steps TEXT,
         tokens_used INTEGER DEFAULT 0,
         latency_ms INTEGER DEFAULT 0,
         tokens_per_second REAL DEFAULT 0,
@@ -234,6 +235,9 @@ export async function initDatabase() {
       }
       if (!msgColNames.includes('tokens_per_second')) {
         await run(`ALTER TABLE chat_messages ADD COLUMN tokens_per_second REAL DEFAULT 0`);
+      }
+      if (!msgColNames.includes('progress_steps')) {
+        await run(`ALTER TABLE chat_messages ADD COLUMN progress_steps TEXT`);
       }
 
       const groupCols = await query(`PRAGMA table_info(user_groups)`);
@@ -394,5 +398,25 @@ async function seedDefaults() {
         await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, 'day', 1000, 1000000, 200000)`, [userGroup.id, m.id]);
       }
     }
+  }
+
+  // Ensure at least one step_progress model is available for demonstration & testing
+  const existingStepProgress = await getOne(`SELECT * FROM ai_models WHERE provider = 'step_progress' LIMIT 1`);
+  if (!existingStepProgress) {
+    const stepModelRes = await run(`
+      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, 120, 1, 1, 1)
+    `, [
+      'Progress Gateway / RAG (Qwen 3 8B)',
+      'step_progress',
+      'qwen3:8b',
+      'http://localhost:8000/v1',
+      '',
+      'Bạn là mô hình RAG nội bộ Local AI với khả năng phân tích yêu cầu, truy vấn SQL và tổng hợp kết quả.'
+    ]);
+    const stepModelId = stepModelRes.lastID;
+
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, 'day', 10000, 10000000, 2000000)`, [adminGroup.id, stepModelId]);
+    await run(`INSERT INTO group_model_access (group_id, model_id, rate_limit_period, rate_limit_requests, max_tokens_group, max_tokens_per_user) VALUES (?, ?, 'day', 1000, 1000000, 200000)`, [userGroup.id, stepModelId]);
   }
 }

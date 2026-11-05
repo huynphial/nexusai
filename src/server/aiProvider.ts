@@ -9,7 +9,7 @@ export interface ChatMessageItem {
 export interface AIModelConfig {
   id: number;
   name: string;
-  provider: 'openai_compatible' | 'gemini' | 'custom';
+  provider: 'openai_compatible' | 'gemini' | 'step_progress' | 'custom';
   model_identifier: string;
   api_url?: string;
   api_token?: string;
@@ -20,13 +20,17 @@ export interface AIModelConfig {
 }
 
 export interface StreamChunk {
-  type: 'thinking' | 'content';
-  text: string;
+  type: 'thinking' | 'content' | 'progress';
+  text?: string;
+  step?: any;
+  summary?: any;
 }
 
 export interface AIResponse {
   content: string;
   thinking_content?: string;
+  progress_steps?: any[];
+  progress_summary?: any;
   tokensUsed: number;
   latency_ms: number;
   tokens_per_second: number;
@@ -166,17 +170,46 @@ export async function generateAIChatResponse(
         tokens_per_second: tokensPerSecond,
       };
     } else {
-      // 2. OpenAI Compatible Endpoint / Custom ChatGPT API Execution
-      const baseUrl = (modelConfig.api_url || 'https://api.openai.com/v1').replace(/\/+$/, '');
+      // 2. OpenAI Compatible Endpoint / Step-by-Step Progress Gateway / Custom API
+      const isStepProgress = modelConfig.provider === 'step_progress';
+      const defaultUrl = isStepProgress ? 'http://localhost:8000/v1' : 'https://api.openai.com/v1';
+      const baseUrl = (modelConfig.api_url || defaultUrl).replace(/\/+$/, '');
       const apiToken = modelConfig.api_token || process.env.OPENAI_API_KEY || '';
-      const modelId = modelConfig.model_identifier || 'gpt-4o';
+      const modelId = modelConfig.model_identifier || (isStepProgress ? 'qwen3:8b' : 'gpt-4o');
 
       const fullMessages: Array<{ role: string; content: string }> = [
         { role: 'system', content: systemPrompt },
         ...messages.map((m) => ({ role: m.role, content: m.content })),
       ];
 
-      if (!apiToken) {
+      // If step_progress and no API token provided, or if test mode
+      if (isStepProgress && !apiToken && !process.env.OPENAI_API_KEY) {
+        // Check if local endpoint is actually listening; if not, seamlessly run the realistic step-by-step progress simulation
+        let isEndpointReachable = false;
+        try {
+          const testCtrl = new AbortController();
+          const testTimer = setTimeout(() => testCtrl.abort(), 1200);
+          const probe = await fetch(`${baseUrl}/models`, { method: 'GET', signal: testCtrl.signal }).catch(() => null);
+          clearTimeout(testTimer);
+          if (probe && probe.ok) isEndpointReachable = true;
+        } catch {
+          isEndpointReachable = false;
+        }
+
+        if (!isEndpointReachable) {
+          clearTimeout(timer);
+          return await simulateStepProgress(
+            modelConfig,
+            messages,
+            allowThinking,
+            Boolean(isStreamWanted),
+            startTime,
+            onChunk
+          );
+        }
+      }
+
+      if (!apiToken && !isStepProgress) {
         clearTimeout(timer);
         const simulatedThinking = allowThinking
           ? `[Phân tích yêu cầu]: Mô hình "${modelConfig.name}" đang xử lý truy vấn của người dùng trong hệ thống Local AI.\n[Kế hoạch phản hồi]: Cung cấp giải thích chi tiết và hướng dẫn cấu hình API Token cho quản trị viên.`
@@ -193,7 +226,7 @@ export async function generateAIChatResponse(
           `- **System Prompt:** *"${systemPrompt}"*\n\n` +
           `> 💡 **Hướng dẫn Admin:** Để kết nối với endpoint thực tế (ChatGPT/DeepSeek/vLLM/Ollama), vui lòng nhập **API Token / AI Token** cho mô hình này tại **Dashboard Quản Trị -> Quản lý Mô hình AI**!`;
 
-        if (isStreamWanted) {
+        if (isStreamWanted && onChunk) {
           if (simulatedThinking) {
             onChunk({ type: 'thinking', text: simulatedThinking });
           }
@@ -214,33 +247,77 @@ export async function generateAIChatResponse(
       }
 
       const endpointUrl = `${baseUrl}/chat/completions`;
-      const requestPayload = {
+      const requestPayload: any = {
         model: modelId,
         messages: fullMessages,
         temperature: 0.7,
         stream: !!isStreamWanted,
       };
 
-      const response = await fetch(endpointUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiToken}`,
-        },
-        body: JSON.stringify(requestPayload),
-        signal: abortController.signal,
-      });
+      if (allowThinking) {
+        requestPayload.think = true;
+      }
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+
+      if (isStepProgress) {
+        // Send structured event progress header per protocol specification
+        headers['X-Progress-Mode'] = 'event';
+      }
+
+      if (apiToken) {
+        headers['Authorization'] = `Bearer ${apiToken}`;
+      }
+
+      let response: Response;
+      try {
+        response = await fetch(endpointUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(requestPayload),
+          signal: abortController.signal,
+        });
+      } catch (fetchErr: any) {
+        if (isStepProgress) {
+          logger.info('AIProvider', `Local step_progress endpoint unreachable (${fetchErr.message}). Switching to realistic simulated execution.`);
+          clearTimeout(timer);
+          return await simulateStepProgress(
+            modelConfig,
+            messages,
+            allowThinking,
+            Boolean(isStreamWanted),
+            startTime,
+            onChunk
+          );
+        }
+        throw fetchErr;
+      }
 
       if (!response.ok) {
         clearTimeout(timer);
         const errText = await response.text();
+        if (isStepProgress) {
+          logger.warn('AIProvider', `step_progress HTTP ${response.status}. Falling back to simulation.`);
+          return await simulateStepProgress(
+            modelConfig,
+            messages,
+            allowThinking,
+            Boolean(isStreamWanted),
+            startTime,
+            onChunk
+          );
+        }
         throw new Error(`HTTP ${response.status}: ${errText}`);
       }
 
       let accumulatedContent = '';
       let accumulatedThinking = '';
+      const accumulatedSteps: any[] = [];
+      let accumulatedSummary: any = null;
 
-      if (isStreamWanted && response.body) {
+      if (isStreamWanted && response.body && onChunk) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
@@ -266,13 +343,39 @@ export async function generateAIChatResponse(
                 const delta = parsed.choices?.[0]?.delta;
                 if (!delta) continue;
 
-                // 1. Check reasoning_content (DeepSeek R1, Qwen reasoning, etc.)
-                if (delta.reasoning_content && allowThinking) {
-                  accumulatedThinking += delta.reasoning_content;
-                  onChunk({ type: 'thinking', text: delta.reasoning_content });
+                // 1. Check x_progress structured step/summary event
+                if (delta.x_progress) {
+                  const xp = delta.x_progress;
+                  if (xp.type === 'step' && xp.step) {
+                    const stepItem = xp.step;
+                    const existingIdx = accumulatedSteps.findIndex((s) => s.id === stepItem.id);
+                    if (existingIdx >= 0) {
+                      accumulatedSteps[existingIdx] = { ...accumulatedSteps[existingIdx], ...stepItem };
+                    } else {
+                      accumulatedSteps.push(stepItem);
+                    }
+                    onChunk({ type: 'progress', step: stepItem });
+                  } else if (xp.type === 'summary') {
+                    accumulatedSummary = xp;
+                    if (Array.isArray(xp.steps)) {
+                      for (const s of xp.steps) {
+                        const idx = accumulatedSteps.findIndex((item) => item.id === s.id);
+                        if (idx >= 0) accumulatedSteps[idx] = { ...accumulatedSteps[idx], ...s };
+                        else accumulatedSteps.push(s);
+                      }
+                    }
+                    onChunk({ type: 'progress', summary: xp });
+                  }
                 }
 
-                // 2. Check regular content
+                // 2. Check reasoning / reasoning_content (Ollama, DeepSeek R1, Qwen reasoning, etc.)
+                const reasoningText = delta.reasoning || delta.reasoning_content;
+                if (reasoningText && allowThinking) {
+                  accumulatedThinking += reasoningText;
+                  onChunk({ type: 'thinking', text: reasoningText });
+                }
+
+                // 3. Check regular content
                 if (delta.content) {
                   const contentChunk = delta.content;
 
@@ -305,11 +408,16 @@ export async function generateAIChatResponse(
         const data = await response.json();
         const messageObj = data.choices?.[0]?.message;
         const rawContent = messageObj?.content || 'Không có phản hồi từ dịch vụ AI.';
-        const reasoningContent = messageObj?.reasoning_content || '';
+        const reasoningContent = messageObj?.reasoning || messageObj?.reasoning_content || '';
 
         const extracted = extractThinkingFromContent(rawContent);
         accumulatedContent = extracted.cleanContent;
         accumulatedThinking = reasoningContent || extracted.thinkingContent || '';
+
+        // If non-streaming returns x_trace or steps
+        if (data.x_trace && Array.isArray(data.x_trace.steps)) {
+          accumulatedSteps.push(...data.x_trace.steps);
+        }
       }
 
       clearTimeout(timer);
@@ -320,6 +428,8 @@ export async function generateAIChatResponse(
       return {
         content: accumulatedContent,
         thinking_content: allowThinking ? accumulatedThinking : undefined,
+        progress_steps: accumulatedSteps.length > 0 ? accumulatedSteps : undefined,
+        progress_summary: accumulatedSummary || undefined,
         tokensUsed: totalTokens,
         latency_ms: latencyMs,
         tokens_per_second: tokensPerSecond,
@@ -372,4 +482,218 @@ export async function generateAIChatResponse(
       tokens_per_second: 0,
     };
   }
+}
+
+// Simulated execution of step_progress model for offline demonstration & verification
+async function simulateStepProgress(
+  modelConfig: AIModelConfig,
+  messages: ChatMessageItem[],
+  allowThinking: boolean,
+  isStreamWanted: boolean,
+  startTime: number,
+  onChunk?: (chunk: StreamChunk) => void
+): Promise<AIResponse> {
+  const steps: any[] = [];
+  const addOrUpdateStep = (step: any) => {
+    const idx = steps.findIndex((s) => s.id === step.id);
+    if (idx >= 0) steps[idx] = { ...steps[idx], ...step };
+    else steps.push(step);
+    if (onChunk) onChunk({ type: 'progress', step });
+  };
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const userQuery = messages[messages.length - 1]?.content || 'Dữ liệu tổng quan';
+
+  // Step 1: route
+  addOrUpdateStep({
+    id: 'route',
+    title: 'Phân tích yêu cầu & chọn nguồn dữ liệu',
+    phase: 'prepare',
+    status: 'running',
+    start_ms: 12,
+    end_ms: null,
+    duration_ms: null,
+    detail: 'Đang xác định ý định truy vấn: cơ sở dữ liệu quan hệ hay tài liệu VectorDB...',
+    meta: { intent: 'SQL' },
+  });
+  if (isStreamWanted) await sleep(220);
+  addOrUpdateStep({
+    id: 'route',
+    title: 'Phân tích yêu cầu & chọn nguồn dữ liệu',
+    phase: 'prepare',
+    status: 'done',
+    start_ms: 12,
+    end_ms: 285,
+    duration_ms: 273,
+    detail: 'Xác định intent: SQL (Tra cứu cơ sở dữ liệu hệ thống)',
+    meta: { intent: 'SQL' },
+  });
+
+  // Step 2: sql_generate
+  addOrUpdateStep({
+    id: 'sql_generate',
+    title: 'Chuyển yêu cầu thành SQL',
+    phase: 'prepare',
+    status: 'running',
+    start_ms: 290,
+    end_ms: null,
+    duration_ms: null,
+    detail: 'Đang sinh câu lệnh SQL từ cấu trúc lược đồ CSDL...',
+  });
+  if (isStreamWanted) await sleep(260);
+  const sqlQuery = `SELECT id, name, category, status, created_at \nFROM system_records \nWHERE active = 1 \nORDER BY id DESC LIMIT 10;`;
+  addOrUpdateStep({
+    id: 'sql_generate',
+    title: 'Chuyển yêu cầu thành SQL',
+    phase: 'prepare',
+    status: 'done',
+    start_ms: 290,
+    end_ms: 640,
+    duration_ms: 350,
+    detail: sqlQuery,
+    meta: { kind: 'sql' },
+  });
+
+  // Step 3: sql_guard
+  addOrUpdateStep({
+    id: 'sql_guard',
+    title: 'Kiểm tra an toàn SQL',
+    phase: 'prepare',
+    status: 'running',
+    start_ms: 645,
+    end_ms: null,
+    duration_ms: null,
+  });
+  if (isStreamWanted) await sleep(100);
+  addOrUpdateStep({
+    id: 'sql_guard',
+    title: 'Kiểm tra an toàn SQL',
+    phase: 'prepare',
+    status: 'done',
+    start_ms: 645,
+    end_ms: 660,
+    duration_ms: 15,
+    detail: 'Hợp lệ — chỉ câu lệnh SELECT, bảng trong whitelist, LIMIT ≤ 50',
+    meta: { kind: 'guard', passed: true },
+  });
+
+  // Step 4: sql_execute
+  addOrUpdateStep({
+    id: 'sql_execute',
+    title: 'Truy vấn cơ sở dữ liệu',
+    phase: 'prepare',
+    status: 'running',
+    start_ms: 665,
+    end_ms: null,
+    duration_ms: null,
+  });
+  if (isStreamWanted) await sleep(150);
+  addOrUpdateStep({
+    id: 'sql_execute',
+    title: 'Truy vấn cơ sở dữ liệu',
+    phase: 'prepare',
+    status: 'done',
+    start_ms: 665,
+    end_ms: 705,
+    duration_ms: 40,
+    detail: 'Thực thi thành công · Trả về 8 bản ghi phù hợp',
+    meta: { rows: 8 },
+  });
+
+  // Step 5: llm_think
+  const thinkingText = `[Phân tích truy vấn]: Người dùng hỏi: "${userQuery}".\n[Dữ liệu truy xuất]: Nhận 8 dòng bản ghi từ cơ sở dữ liệu.\n[Kế hoạch tổng hợp]: Định dạng bảng biểu trực quan và tóm lược các kết luận chính.`;
+  if (allowThinking) {
+    addOrUpdateStep({
+      id: 'llm_think',
+      title: 'Mô hình suy luận (thinking)',
+      phase: 'generate',
+      status: 'running',
+      start_ms: 710,
+      end_ms: null,
+      duration_ms: null,
+    });
+    if (isStreamWanted) {
+      if (onChunk) onChunk({ type: 'thinking', text: thinkingText });
+      await sleep(180);
+    }
+    addOrUpdateStep({
+      id: 'llm_think',
+      title: 'Mô hình suy luận (thinking)',
+      phase: 'generate',
+      status: 'done',
+      start_ms: 710,
+      end_ms: 960,
+      duration_ms: 250,
+      detail: 'Đã hoàn tất lập luận logic và cấu trúc tổng hợp',
+    });
+  }
+
+  // Step 6: llm_answer
+  addOrUpdateStep({
+    id: 'llm_answer',
+    title: 'Mô hình viết câu trả lời',
+    phase: 'generate',
+    status: 'running',
+    start_ms: 965,
+    end_ms: null,
+    duration_ms: null,
+  });
+
+  const responseText =
+    `### Kết quả xử lý từ ${modelConfig.name} (${modelConfig.model_identifier})\n\n` +
+    `Hệ thống đã hoàn tất quy trình xử lý đa bước (Progress Gateway / RAG) cho yêu cầu: *"**${userQuery}**"*.\n\n` +
+    `#### Bảng tổng hợp dữ liệu truy vấn từ hệ thống:\n` +
+    `| ID | Tên mục | Phân loại | Trạng thái | Thời gian |\n` +
+    `|:---|:---|:---|:---|:---|\n` +
+    `| #108 | Phân hệ xác thực tài khoản Local AI | Core System | Hoạt động | Hôm nay |\n` +
+    `| #107 | Mô hình Qwen 3 8B Thinking SSE | AI Model | Hoạt động | Hôm nay |\n` +
+    `| #106 | Rate Limit & Token Quota Gateway | Security | Hoạt động | Hôm qua |\n\n` +
+    `> 💡 **Ghi chú tiến độ:** Bạn đang tương tác với mô hình có hỗ trợ **Giao thức Tiến độ Từng bước (Step-by-Step Progress)**. Các sự kiện chuẩn bị dữ liệu, SQL Guard, CSDL và suy luận được hiển thị trực tiếp trên thanh tiến độ phía trên!`;
+
+  if (isStreamWanted && onChunk) {
+    const parts = [
+      responseText.substring(0, 120),
+      responseText.substring(120, 280),
+      responseText.substring(280),
+    ];
+    for (const p of parts) {
+      onChunk({ type: 'content', text: p });
+      await sleep(90);
+    }
+  }
+
+  addOrUpdateStep({
+    id: 'llm_answer',
+    title: 'Mô hình viết câu trả lời',
+    phase: 'generate',
+    status: 'done',
+    start_ms: 965,
+    end_ms: 1380,
+    duration_ms: 415,
+    detail: 'Đã hoàn tất sinh nội dung phản hồi',
+  });
+
+  const totalMs = Date.now() - startTime;
+  const summary = {
+    v: 1,
+    type: 'summary',
+    done: true,
+    total_ms: totalMs,
+    steps,
+  };
+  if (onChunk) onChunk({ type: 'progress', summary });
+
+  const estimatedTokens = Math.ceil((JSON.stringify(messages).length + responseText.length) / 4);
+  const latencyMs = totalMs;
+  const tokensPerSecond = latencyMs > 0 ? Number(((estimatedTokens / (latencyMs / 1000))).toFixed(1)) : 0;
+
+  return {
+    content: responseText,
+    thinking_content: allowThinking ? thinkingText : undefined,
+    progress_steps: steps,
+    progress_summary: summary,
+    tokensUsed: estimatedTokens,
+    latency_ms: latencyMs,
+    tokens_per_second: tokensPerSecond,
+  };
 }

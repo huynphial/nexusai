@@ -148,12 +148,25 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
     }
 
     const messages = await query(
-      `SELECT id, session_id, sender, content, thinking_content, tokens_used, latency_ms, tokens_per_second, created_at
+      `SELECT id, session_id, sender, content, thinking_content, progress_steps, tokens_used, latency_ms, tokens_per_second, created_at
        FROM chat_messages WHERE session_id = ? ORDER BY id ASC`,
       [sessionId]
     );
 
-    res.json({ messages });
+    const parsedMessages = messages.map((m: any) => ({
+      ...m,
+      progress_steps: m.progress_steps
+        ? (() => {
+            try {
+              return JSON.parse(m.progress_steps);
+            } catch {
+              return undefined;
+            }
+          })()
+        : undefined,
+    }));
+
+    res.json({ messages: parsedMessages });
   } catch (err: any) {
     res.status(500).json({ error: 'Không thể tải lịch sử tin nhắn.' });
   }
@@ -245,18 +258,23 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       history,
       (chunk) => {
         // Send chunk to client via SSE
-        res.write(`data: ${JSON.stringify({ type: chunk.type, text: chunk.text })}\n\n`);
+        if (chunk.type === 'progress') {
+          res.write(`data: ${JSON.stringify({ type: 'progress', step: chunk.step, summary: chunk.summary })}\n\n`);
+        } else {
+          res.write(`data: ${JSON.stringify({ type: chunk.type, text: chunk.text })}\n\n`);
+        }
       }
     );
 
-    // Save assistant message to database with thinking content & performance metrics
+    // Save assistant message to database with thinking content, progress steps & performance metrics
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
+        aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
         aiResult.tokensUsed,
         aiResult.latency_ms,
         aiResult.tokens_per_second
@@ -282,6 +300,8 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       sender: 'assistant',
       content: aiResult.content,
       thinking_content: aiResult.thinking_content || null,
+      progress_steps: aiResult.progress_steps || undefined,
+      progress_summary: aiResult.progress_summary || undefined,
       tokens_used: aiResult.tokensUsed,
       latency_ms: aiResult.latency_ms,
       tokens_per_second: aiResult.tokens_per_second,
@@ -379,12 +399,13 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     const aiResult = await generateAIChatResponse(modelConfig, history);
 
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
+        aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
         aiResult.tokensUsed,
         aiResult.latency_ms,
         aiResult.tokens_per_second
@@ -412,6 +433,8 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
         sender: 'assistant',
         content: aiResult.content,
         thinking_content: aiResult.thinking_content || null,
+        progress_steps: aiResult.progress_steps || undefined,
+        progress_summary: aiResult.progress_summary || undefined,
         tokens_used: aiResult.tokensUsed,
         latency_ms: aiResult.latency_ms,
         tokens_per_second: aiResult.tokens_per_second,

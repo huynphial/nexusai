@@ -1,4 +1,4 @@
-import { User, UserGroup, AIModel, ModelWithQuota, ChatSession, ChatMessage, DashboardStats, SystemEnvInfo } from './types';
+import { User, UserGroup, AIModel, ModelWithQuota, ChatSession, ChatMessage, DashboardStats, SystemEnvInfo, ProgressStep, ProgressSummary } from './types';
 
 const API_BASE = '/api';
 
@@ -90,7 +90,12 @@ export const api = {
   streamMessage: async (
     data: { session_id?: number; model_id?: number; prompt: string; enable_thinking?: boolean },
     callbacks: {
-      onChunk: (chunk: { type: 'thinking' | 'content'; text: string }) => void;
+      onChunk: (chunk: {
+        type: 'thinking' | 'content' | 'progress';
+        text?: string;
+        step?: ProgressStep;
+        summary?: ProgressSummary;
+      }) => void;
       onDone: (res: { session_id: number; message: ChatMessage; updated_quota?: any }) => void;
       onError: (err: string) => void;
     },
@@ -138,7 +143,7 @@ export const api = {
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
           try {
             const parsed = JSON.parse(trimmed.substring(6));
-            if (parsed.type === 'thinking' || parsed.type === 'content') {
+            if (parsed.type === 'thinking' || parsed.type === 'content' || parsed.type === 'progress') {
               callbacks.onChunk(parsed);
             } else if (parsed.type === 'done') {
               callbacks.onDone(parsed);

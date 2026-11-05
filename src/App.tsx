@@ -5,7 +5,7 @@ import { Sidebar } from './components/Sidebar';
 import { ChatWindow } from './components/ChatWindow';
 import { LoginModal } from './components/LoginModal';
 import { DashboardMain } from './components/Dashboard/DashboardMain';
-import { ChatSession, ChatMessage, ModelWithQuota } from './types';
+import { ChatSession, ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from './types';
 import { api } from './api';
 import { Menu } from 'lucide-react';
 
@@ -137,7 +137,13 @@ function MainContent() {
     }
   };
 
-  const [streamingData, setStreamingData] = useState<{ content: string; thinking?: string; isThinking?: boolean } | null>(null);
+  const [streamingData, setStreamingData] = useState<{
+    content: string;
+    thinking?: string;
+    isThinking?: boolean;
+    progress_steps?: ProgressStep[];
+    progress_summary?: ProgressSummary;
+  } | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(true);
   const [isStreamPaused, setIsStreamPaused] = useState(false);
   const isPausedRef = useRef(false);
@@ -163,13 +169,15 @@ function MainContent() {
     isPausedRef.current = false;
     setIsStreamPaused(false);
 
-    if (streamingData && (streamingData.content || streamingData.thinking)) {
+    if (streamingData && (streamingData.content || streamingData.thinking || streamingData.progress_steps?.length)) {
       const partialMsg: ChatMessage = {
         id: Date.now(),
         session_id: activeSessionId || 0,
         sender: 'assistant',
-        content: streamingData.content || '(Đã hủy tiến trình nhận phản hồi)',
+        content: streamingData.content || '(Đã dừng tiến trình)',
         thinking_content: streamingData.thinking || undefined,
+        progress_steps: streamingData.progress_steps || undefined,
+        progress_summary: streamingData.progress_summary || undefined,
         tokens_used: Math.ceil(((streamingData.content || '').length + (streamingData.thinking || '').length) / 4),
         created_at: new Date().toISOString(),
       };
@@ -247,20 +255,50 @@ function MainContent() {
             });
           }
 
-          if (chunk.type === 'thinking') {
-            accumulatedThinking += chunk.text;
-            setStreamingData({
+          if (chunk.type === 'progress') {
+            setStreamingData((prev) => {
+              const currentSteps = prev?.progress_steps ? [...prev.progress_steps] : [];
+              if (chunk.step) {
+                const idx = currentSteps.findIndex((s) => s.id === chunk.step!.id);
+                if (idx >= 0) {
+                  currentSteps[idx] = { ...currentSteps[idx], ...chunk.step };
+                } else {
+                  currentSteps.push(chunk.step);
+                }
+              } else if (chunk.summary?.steps) {
+                for (const s of chunk.summary.steps) {
+                  const idx = currentSteps.findIndex((item) => item.id === s.id);
+                  if (idx >= 0) currentSteps[idx] = { ...currentSteps[idx], ...s };
+                  else currentSteps.push(s);
+                }
+              }
+
+              return {
+                content: prev?.content || accumulatedContent,
+                thinking: prev?.thinking || accumulatedThinking,
+                isThinking: prev?.isThinking ?? false,
+                progress_steps: currentSteps,
+                progress_summary: chunk.summary || prev?.progress_summary,
+              };
+            });
+          } else if (chunk.type === 'thinking') {
+            accumulatedThinking += chunk.text || '';
+            setStreamingData((prev) => ({
               content: accumulatedContent,
               thinking: accumulatedThinking,
               isThinking: true,
-            });
+              progress_steps: prev?.progress_steps,
+              progress_summary: prev?.progress_summary,
+            }));
           } else {
-            accumulatedContent += chunk.text;
-            setStreamingData({
+            accumulatedContent += chunk.text || '';
+            setStreamingData((prev) => ({
               content: accumulatedContent,
               thinking: accumulatedThinking,
               isThinking: false,
-            });
+              progress_steps: prev?.progress_steps,
+              progress_summary: prev?.progress_summary,
+            }));
           }
         },
         onDone: async (res) => {

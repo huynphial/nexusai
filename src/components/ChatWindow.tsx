@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChatMessage, ModelWithQuota } from '../types';
+import { ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from '../types';
 import { MarkdownViewer } from './MarkdownViewer';
 import {
   Send,
@@ -34,7 +34,13 @@ interface Props {
   onSelectModel: (id: number) => void;
   errorMsg: string | null;
   onClearError: () => void;
-  streamingData?: { content: string; thinking?: string; isThinking?: boolean } | null;
+  streamingData?: {
+    content: string;
+    thinking?: string;
+    isThinking?: boolean;
+    progress_steps?: ProgressStep[];
+    progress_summary?: ProgressSummary;
+  } | null;
   onCancelStream?: () => void;
   onTogglePauseStream?: () => void;
   isStreamPaused?: boolean;
@@ -137,31 +143,182 @@ export const ChatWindow: React.FC<Props> = ({
 
   const modelSupportsThinking = Boolean(selectedModel?.enable_thinking);
 
+  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setIsModelDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   return (
     <div className="flex-1 flex flex-col h-[calc(100vh-3.5rem)] bg-white dark:bg-slate-900 relative">
-      {/* Active Model Header Bar: Clean Dropdown & Thinking Toggle (Timeout and System Prompt removed) */}
+      {/* Active Model Header Bar: Custom Dropdown Menu with Quotas & Thinking Toggle */}
       <div className="h-14 border-b border-slate-200 dark:border-slate-800 px-4 flex items-center justify-between bg-slate-50/70 dark:bg-slate-900/70 backdrop-blur-md">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-indigo-600/10 dark:bg-indigo-400/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-bold shrink-0">
             <Cpu className="w-4 h-4" />
           </div>
 
-          {/* Simple Dropdown showing ONLY model name */}
-          <div className="relative">
-            <select
-              value={selectedModel?.id || ''}
-              onChange={(e) => onSelectModel(Number(e.target.value))}
-              className="text-xs sm:text-sm font-bold pl-2 pr-7 py-1.5 bg-transparent hover:bg-slate-200/50 dark:hover:bg-slate-800 rounded-lg text-slate-800 dark:text-slate-100 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 appearance-none cursor-pointer transition-colors"
+          {/* Custom Model Selector Popover: Quota and token consumption visible when expanded */}
+          <div className="relative" ref={modelDropdownRef}>
+            <button
+              type="button"
+              onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
+              className="flex items-center gap-2 pl-2 pr-3 py-1.5 bg-slate-100 hover:bg-slate-200/70 dark:bg-slate-800/80 dark:hover:bg-slate-800 rounded-xl text-slate-800 dark:text-slate-100 transition-colors border border-slate-200/80 dark:border-slate-700/80 shadow-2xs cursor-pointer"
             >
-              {availableModels.map((m) => (
-                <option key={m.id} value={m.id} disabled={!m.allowed} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
-                  {m.name} {!m.allowed ? '(Hết hạn ngạch)' : ''}
-                </option>
-              ))}
-            </select>
-            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-1.5 text-slate-400">
-              <ChevronDown className="w-3.5 h-3.5" />
-            </div>
+              <span className="text-xs sm:text-sm font-bold truncate max-w-[150px] sm:max-w-[220px]">
+                {selectedModel?.name || 'Chọn mô hình AI'}
+              </span>
+              {selectedModel?.provider === 'step_progress' && (
+                <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0">
+                  RAG
+                </span>
+              )}
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-slate-400 transition-transform ${
+                  isModelDropdownOpen ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+
+            {/* Dropdown Popover with Quota Consumption Details */}
+            {isModelDropdownOpen && (
+              <div className="absolute top-full left-0 mt-2 w-80 sm:w-96 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl z-50 overflow-hidden animate-in fade-in duration-150">
+                <div className="p-3 border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 flex items-center justify-between">
+                  <div className="font-bold text-xs text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                    <Cpu className="w-3.5 h-3.5 text-indigo-500" />
+                    <span>Mô hình AI & Hạn mức Token</span>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full font-medium bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                    {availableModels.length} mô hình
+                  </span>
+                </div>
+
+                <div className="max-h-80 overflow-y-auto p-2 space-y-2">
+                  {availableModels.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-slate-400">
+                      Chưa có mô hình nào được phân quyền.
+                    </div>
+                  ) : (
+                    availableModels.map((m) => {
+                      const isSelected = m.id === selectedModel?.id;
+                      const quota = m.quota;
+
+                      return (
+                        <div
+                          key={m.id}
+                          onClick={() => {
+                            if (m.allowed) {
+                              onSelectModel(m.id);
+                              setIsModelDropdownOpen(false);
+                            }
+                          }}
+                          className={`p-3 rounded-xl border transition-all ${
+                            isSelected
+                              ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-400 dark:border-indigo-700 shadow-2xs'
+                              : 'bg-white dark:bg-slate-900/60 border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+                          } ${!m.allowed ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
+                        >
+                          {/* Model Header */}
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-bold text-xs text-slate-900 dark:text-slate-100 truncate">
+                                {m.name}
+                              </span>
+                              {m.provider === 'step_progress' && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0">
+                                  Tiến độ từng bước (RAG)
+                                </span>
+                              )}
+                              {m.is_default && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0">
+                                  Mặc định
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              {isSelected && (
+                                <div className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center">
+                                  <Check className="w-3 h-3" />
+                                </div>
+                              )}
+                              {!m.allowed && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20">
+                                  Hết hạn ngạch
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Token Quota Details: only visible inside this dropdown when expanded! */}
+                          {quota ? (
+                            <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-1.5 text-[10px]">
+                              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 font-medium">
+                                <span>Hạn mức ({quota.period}):</span>
+                                <span className="font-mono text-slate-700 dark:text-slate-300 font-semibold">
+                                  {quota.user_requests} / {quota.rate_limit_requests > 0 ? quota.rate_limit_requests : '∞'} req
+                                </span>
+                              </div>
+
+                              {/* Personal Token Bar */}
+                              <div>
+                                <div className="flex justify-between text-slate-500 dark:text-slate-400">
+                                  <span>Token cá nhân:</span>
+                                  <span className="font-mono font-medium text-slate-700 dark:text-slate-300">
+                                    {quota.user_tokens.toLocaleString()} / {quota.max_tokens_per_user > 0 ? quota.max_tokens_per_user.toLocaleString() : '∞'}
+                                  </span>
+                                </div>
+                                {quota.max_tokens_per_user > 0 && (
+                                  <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden mt-0.5">
+                                    <div
+                                      className="bg-indigo-500 h-full transition-all"
+                                      style={{
+                                        width: `${Math.min(100, (quota.user_tokens / quota.max_tokens_per_user) * 100)}%`,
+                                      }}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Group Token Bar */}
+                              <div>
+                                <div className="flex justify-between text-slate-500 dark:text-slate-400">
+                                  <span>Token cả nhóm:</span>
+                                  <span className="font-mono font-medium text-slate-700 dark:text-slate-300">
+                                    {quota.group_tokens.toLocaleString()} / {quota.max_tokens_group > 0 ? quota.max_tokens_group.toLocaleString() : '∞'}
+                                  </span>
+                                </div>
+                                {quota.max_tokens_group > 0 && (
+                                  <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden mt-0.5">
+                                    <div
+                                      className="bg-purple-500 h-full transition-all"
+                                      style={{
+                                        width: `${Math.min(100, (quota.group_tokens / quota.max_tokens_group) * 100)}%`,
+                                      }}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-[10px] text-slate-400 mt-1 font-mono">
+                              Không giới hạn hạn mức token
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -332,6 +489,11 @@ export const ChatWindow: React.FC<Props> = ({
                     )
                   ) : (
                     <>
+                      {/* Step-by-Step Execution Progress (Gateway / RAG model) */}
+                      {m.progress_steps && m.progress_steps.length > 0 && (
+                        <ProgressTimeline steps={m.progress_steps} summary={m.progress_summary} isLive={false} />
+                      )}
+
                       {/* Thinking / Reasoning Box (if model produced thinking) */}
                       {m.thinking_content && (
                         <ThinkingBox thinking={m.thinking_content} isLive={false} />
@@ -416,6 +578,15 @@ export const ChatWindow: React.FC<Props> = ({
                   <Pause className="w-3.5 h-3.5" />
                   <span>Đang tạm dừng stream. Nhấn nút <b>"Tiếp tục"</b> bên dưới để nhận tiếp.</span>
                 </div>
+              )}
+
+              {/* Live Step-by-Step Execution Progress (Gateway / RAG model) */}
+              {streamingData.progress_steps && streamingData.progress_steps.length > 0 && (
+                <ProgressTimeline
+                  steps={streamingData.progress_steps}
+                  summary={streamingData.progress_summary}
+                  isLive={true}
+                />
               )}
 
               {/* Live Thinking Process (Streamed in realtime if model supports thinking and user has thinking enabled) */}
@@ -571,6 +742,185 @@ const ThinkingBox = ({ thinking, isLive = false }: { thinking: string; isLive?: 
       {isOpen && (
         <div className="p-3 pt-1 border-t border-indigo-100 dark:border-indigo-950/60 font-mono text-[11px] leading-relaxed text-slate-600 dark:text-slate-400 whitespace-pre-wrap max-h-60 overflow-y-auto bg-white/40 dark:bg-slate-950/30">
           {thinking}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Step-by-Step Execution Progress Timeline (Progress Gateway / RAG)
+const ProgressTimeline: React.FC<{
+  steps: ProgressStep[];
+  summary?: ProgressSummary;
+  isLive?: boolean;
+}> = ({ steps, summary, isLive = false }) => {
+  const [isOpen, setIsOpen] = useState(true);
+  const [copiedSqlId, setCopiedSqlId] = useState<string | null>(null);
+
+  const handleCopySql = async (id: string, sql: string) => {
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopiedSqlId(id);
+      setTimeout(() => setCopiedSqlId(null), 1800);
+    } catch {
+      // ignore
+    }
+  };
+
+  const doneSteps = steps.filter((s) => s.status === 'done').length;
+  const hasError = steps.some((s) => s.status === 'error');
+  const isRunning = isLive && steps.some((s) => s.status === 'running');
+  const totalMs = summary?.total_ms || (steps.length > 0 && steps[steps.length - 1].end_ms && steps[0].start_ms !== undefined ? (steps[steps.length - 1].end_ms! - steps[0].start_ms!) : 0);
+
+  return (
+    <div className="mb-3 rounded-2xl border border-purple-200/80 dark:border-purple-900/50 bg-gradient-to-b from-purple-50/70 to-indigo-50/40 dark:from-slate-950/90 dark:to-purple-950/30 overflow-hidden text-xs shadow-2xs transition-all">
+      {/* Header bar */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between px-3.5 py-2.5 text-purple-900 dark:text-purple-300 font-semibold hover:bg-purple-100/50 dark:hover:bg-purple-950/40 transition-colors cursor-pointer"
+      >
+        <div className="flex items-center gap-2">
+          {isRunning ? (
+            <div className="w-5 h-5 rounded-full bg-indigo-500/10 flex items-center justify-center">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600 dark:text-indigo-400" />
+            </div>
+          ) : hasError ? (
+            <div className="w-5 h-5 rounded-full bg-red-500/10 flex items-center justify-center">
+              <AlertCircle className="w-3.5 h-3.5 text-red-500" />
+            </div>
+          ) : (
+            <div className="w-5 h-5 rounded-full bg-emerald-500/10 flex items-center justify-center">
+              <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            </div>
+          )}
+          <span className="font-bold text-xs">
+            {isRunning ? 'Tiến độ thực hiện từng bước (Đang chạy...)' : 'Tiến trình thực hiện từng bước (Gateway / RAG)'}
+          </span>
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-medium bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-800/60">
+            {doneSteps}/{steps.length} bước
+          </span>
+          {totalMs > 0 && (
+            <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
+              · {(totalMs / 1000).toFixed(2)}s
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1 text-[11px] text-purple-600 dark:text-purple-400">
+          <span>{isOpen ? 'Thu gọn' : 'Xem tiến độ'}</span>
+          {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </div>
+      </button>
+
+      {/* Steps List */}
+      {isOpen && (
+        <div className="p-3 pt-1 border-t border-purple-100 dark:border-purple-950/70 space-y-2 bg-white/60 dark:bg-slate-950/40">
+          {steps.map((step, idx) => {
+            const isDone = step.status === 'done';
+            const isRunningStep = step.status === 'running';
+            const isError = step.status === 'error';
+            const isSql = step.meta?.kind === 'sql' || (step.detail && /^(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i.test(step.detail.trim()));
+
+            return (
+              <div
+                key={step.id || idx}
+                className={`relative pl-6 pb-2 last:pb-0 ${
+                  idx !== steps.length - 1 ? 'border-l-2 border-slate-200 dark:border-slate-800 ml-2.5' : 'ml-2.5'
+                }`}
+              >
+                {/* Node marker icon */}
+                <div
+                  className={`absolute -left-[9px] top-0.5 w-4 h-4 rounded-full flex items-center justify-center text-[10px] ring-2 ring-white dark:ring-slate-900 ${
+                    isRunningStep
+                      ? 'bg-indigo-600 text-white animate-pulse'
+                      : isDone
+                      ? 'bg-emerald-600 text-white'
+                      : isError
+                      ? 'bg-red-600 text-white'
+                      : 'bg-slate-300 dark:bg-slate-700 text-slate-600'
+                  }`}
+                >
+                  {isRunningStep ? (
+                    <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                  ) : isDone ? (
+                    <Check className="w-2.5 h-2.5" />
+                  ) : isError ? (
+                    '!'
+                  ) : (
+                    '•'
+                  )}
+                </div>
+
+                {/* Step Content Card */}
+                <div className="bg-white/80 dark:bg-slate-900/80 rounded-xl p-2.5 border border-slate-200/80 dark:border-slate-800 shadow-2xs">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-1.5 font-semibold text-slate-800 dark:text-slate-200">
+                      <span>{step.title || step.id}</span>
+                      {step.phase && (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded font-normal bg-slate-100 dark:bg-slate-800 text-slate-500 uppercase tracking-wider">
+                          {step.phase}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                      {step.duration_ms !== null && step.duration_ms !== undefined ? (
+                        <span className="text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                          {step.duration_ms}ms
+                        </span>
+                      ) : isRunningStep ? (
+                        <span className="text-indigo-600 dark:text-indigo-400 font-semibold animate-pulse">
+                          Đang chạy...
+                        </span>
+                      ) : null}
+
+                      {step.meta?.rows !== undefined && (
+                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-200/50 dark:border-emerald-900/50">
+                          {step.meta.rows} dòng
+                        </span>
+                      )}
+
+                      {step.meta?.intent && (
+                        <span className="text-purple-600 dark:text-purple-400 font-medium bg-purple-50 dark:bg-purple-950/40 px-1.5 py-0.5 rounded border border-purple-200/50 dark:border-purple-900/50">
+                          {step.meta.intent}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Step detail (SQL query or explanation) */}
+                  {step.detail && (
+                    <div className="mt-1.5">
+                      {isSql ? (
+                        <div className="relative group">
+                          <pre className="p-2 rounded-lg bg-slate-900 text-emerald-400 font-mono text-[11px] leading-relaxed overflow-x-auto whitespace-pre-wrap break-all border border-slate-800">
+                            {step.detail}
+                          </pre>
+                          <button
+                            type="button"
+                            onClick={() => handleCopySql(step.id, step.detail!)}
+                            className="absolute top-1.5 right-1.5 p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-opacity text-[10px] flex items-center gap-1 shadow-xs cursor-pointer"
+                            title="Sao chép SQL"
+                          >
+                            {copiedSqlId === step.id ? (
+                              <Check className="w-3 h-3 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed font-mono">
+                          {step.detail}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

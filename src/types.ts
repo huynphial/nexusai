@@ -21,10 +21,34 @@ export interface UserGroup {
   access_rules?: GroupModelAccess[];
 }
 
+export interface ProgressStep {
+  id: string;
+  title: string;
+  phase?: 'prepare' | 'generate' | string;
+  status: 'running' | 'done' | 'error';
+  start_ms?: number;
+  end_ms?: number | null;
+  duration_ms?: number | null;
+  detail?: string;
+  meta?: {
+    kind?: string;
+    rows?: number;
+    intent?: string;
+    [key: string]: any;
+  };
+}
+
+export interface ProgressSummary {
+  trace_id?: string;
+  total_ms?: number;
+  done?: boolean;
+  steps: ProgressStep[];
+}
+
 export interface AIModel {
   id: number;
   name: string;
-  provider: 'openai_compatible' | 'gemini' | 'custom';
+  provider: 'openai_compatible' | 'gemini' | 'step_progress' | 'custom';
   model_identifier: string;
   api_url?: string;
   api_token?: string;
@@ -88,6 +112,8 @@ export interface ChatMessage {
   sender: 'user' | 'assistant' | 'system';
   content: string;
   thinking_content?: string;
+  progress_steps?: ProgressStep[];
+  progress_summary?: ProgressSummary;
   tokens_used: number;
   latency_ms?: number;
   tokens_per_second?: number;
