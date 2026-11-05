@@ -146,7 +146,7 @@ export const ModelManagementTab: React.FC<Props> = ({
                       {m.name}
                       <span className="block text-[10px] text-slate-400 font-normal">
                         {m.provider === 'step_progress' ? (
-                          <span className="text-purple-600 dark:text-purple-400 font-semibold">⚡ Tiến độ từng bước (RAG Gateway)</span>
+                          <span className="text-purple-600 dark:text-purple-400 font-semibold">⚡ Suy luận từng bước</span>
                         ) : (
                           m.provider
                         )}
@@ -269,7 +269,7 @@ export const ModelManagementTab: React.FC<Props> = ({
                     className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl"
                   >
                     <option value="openai_compatible">OpenAI Compatible (ChatGPT/DeepSeek/vLLM)</option>
-                    <option value="step_progress">Model Tiến Độ Từng Bước (Progress Gateway / RAG)</option>
+                    <option value="step_progress">Model Suy Luận Từng Bước</option>
                     <option value="gemini">Gemini SDK</option>
                     <option value="custom">Custom Proxy</option>
                   </select>

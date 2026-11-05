@@ -7,7 +7,6 @@ interface AuthContextType {
   token: string | null;
   loading: boolean;
   login: (credentials: { email: string; password: string }) => Promise<User>;
-  register: (data: { name: string; email: string; password: string }) => Promise<User>;
   logout: () => void;
   refreshUser: () => Promise<void>;
 }
@@ -50,14 +49,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return res.user;
   };
 
-  const register = async (data: { name: string; email: string; password: string }) => {
-    const res = await api.register(data);
-    localStorage.setItem('nexus_jwt_token', res.token);
-    setToken(res.token);
-    setUser(res.user);
-    return res.user;
-  };
-
   const logout = () => {
     localStorage.removeItem('nexus_jwt_token');
     setToken(null);
@@ -69,7 +60,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, token, loading, login, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

@@ -66,55 +66,11 @@ router.post('/login', async (req: CustomRequest, res: Response) => {
   }
 });
 
-// Register
-router.post('/register', async (req: CustomRequest, res: Response) => {
-  try {
-    const { name, email, password } = req.body;
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: 'Vui lòng nhập đầy đủ Họ tên, Email và Mật khẩu.' });
-    }
-
-    const existingUser = await getOne(`SELECT id FROM users WHERE LOWER(email) = LOWER(?)`, [email.trim()]);
-    if (existingUser) {
-      return res.status(400).json({ error: 'Email này đã được đăng ký sử dụng.' });
-    }
-
-    const defaultGroup = await getOne(`SELECT id FROM user_groups ORDER BY id ASC LIMIT 1`);
-    const groupId = defaultGroup ? defaultGroup.id : 1;
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await run(
-      `INSERT INTO users (name, email, password_hash, role, user_group_id, status) VALUES (?, ?, ?, 'user', ?, 'active')`,
-      [name.trim(), email.trim(), hashedPassword, groupId]
-    );
-
-    const newUser = await getOne(
-      `SELECT u.*, g.name as group_name FROM users u LEFT JOIN user_groups g ON u.user_group_id = g.id WHERE u.id = ?`,
-      [result.lastID]
-    );
-
-    const authenticatedUser = {
-      id: newUser.id,
-      email: newUser.email,
-      name: newUser.name,
-      role: newUser.role,
-      user_group_id: newUser.user_group_id,
-      group_name: newUser.group_name || 'Chưa xếp nhóm'
-    };
-
-    const token = generateToken(authenticatedUser);
-
-    await logger.audit(newUser.id, newUser.email, 'USER_REGISTER', `Tài khoản mới đăng ký hệ thống`, req.ip);
-
-    res.status(201).json({
-      message: 'Đăng ký tài khoản thành công',
-      token,
-      user: authenticatedUser
-    });
-  } catch (err: any) {
-    logger.error('AuthRoute', 'Register Error', err);
-    res.status(500).json({ error: 'Lỗi hệ thống khi đăng ký.' });
-  }
+// Register (Disabled per system policy: only Admin can create users)
+router.post('/register', async (_req: CustomRequest, res: Response) => {
+  return res.status(403).json({
+    error: 'Tính năng tự đăng ký tài khoản đã bị vô hiệu hóa. Vui lòng liên hệ Quản trị viên hệ thống để được cấp tài khoản sử dụng.'
+  });
 });
 
 // Current user details

@@ -36,12 +36,6 @@ export const api = {
       body: JSON.stringify(credentials),
     }),
 
-  register: (data: { name: string; email: string; password: string }) =>
-    request<{ token: string; user: User }>('/auth/register', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-
   getMe: () => request<{ user: User }>('/auth/me'),
 
   updateProfile: (data: { name?: string; currentPassword?: string; newPassword?: string }) =>

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Bot, Lock, Mail, User as UserIcon, X, Sparkles, Key, CheckCircle2 } from 'lucide-react';
+import { Bot, Lock, Mail, X } from 'lucide-react';
 
 interface Props {
   isOpen: boolean;
@@ -8,9 +8,7 @@ interface Props {
 }
 
 export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
-  const { login, register } = useAuth();
-  const [isRegister, setIsRegister] = useState(false);
-  const [name, setName] = useState('');
+  const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -24,24 +22,13 @@ export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setLoading(true);
 
     try {
-      if (isRegister) {
-        await register({ name, email, password });
-      } else {
-        await login({ email, password });
-      }
+      await login({ email: email.trim(), password });
       onClose();
     } catch (err: any) {
-      setError(err.message || 'Có lỗi xảy ra.');
+      setError(err.message || 'Email hoặc mật khẩu không chính xác.');
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleFillDemo = (demoEmail: string, demoPass: string) => {
-    setEmail(demoEmail);
-    setPassword(demoPass);
-    setIsRegister(false);
-    setError(null);
   };
 
   return (
@@ -60,14 +47,14 @@ export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
             <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center font-bold">
               <Bot className="w-5 h-5" />
             </div>
-            <span className="font-extrabold text-lg tracking-tight">Local AI Portal</span>
+            <span className="font-extrabold text-lg tracking-tight">Local AI</span>
           </div>
 
           <h2 className="text-base font-semibold text-slate-100">
-            {isRegister ? 'Đăng ký tài khoản mới' : 'Đăng nhập hệ thống Chat LLM'}
+            Đăng nhập hệ thống
           </h2>
           <p className="text-xs text-slate-300 mt-1">
-            Đăng nhập để sử dụng các mô hình AI tương thích ChatGPT & phân quyền theo nhóm.
+            Đăng nhập để sử dụng các mô hình AI và trò chuyện trực tiếp.
           </p>
         </div>
 
@@ -80,23 +67,6 @@ export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4 text-xs">
-            {isRegister && (
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Họ và tên</label>
-                <div className="relative">
-                  <UserIcon className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
-                  <input
-                    type="text"
-                    required
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="Nguyễn Văn A"
-                    className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
-            )}
-
             <div>
               <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Email đăng nhập</label>
               <div className="relative">
@@ -106,7 +76,7 @@ export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="admin@nexusai.io"
+                  placeholder="name@company.com"
                   className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
@@ -130,31 +100,15 @@ export const LoginModal: React.FC<Props> = ({ isOpen, onClose }) => {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold shadow-sm transition-colors text-xs"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold shadow-sm transition-colors text-xs cursor-pointer disabled:opacity-50"
             >
-              {loading ? 'Đang xử lý...' : isRegister ? 'Đăng ký tài khoản' : 'Đăng nhập'}
+              {loading ? 'Đang xác thực...' : 'Đăng nhập'}
             </button>
           </form>
 
-
-
-          {/* Toggle Register / Login */}
-          <div className="mt-4 text-center text-xs text-slate-500">
-            {isRegister ? (
-              <span>
-                Đã có tài khoản?{' '}
-                <button onClick={() => setIsRegister(false)} className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
-                  Đăng nhập
-                </button>
-              </span>
-            ) : (
-              <span>
-                Chưa có tài khoản?{' '}
-                <button onClick={() => setIsRegister(true)} className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
-                  Đăng ký ngay
-                </button>
-              </span>
-            )}
+          {/* Admin Managed Note */}
+          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 text-center text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+            Chưa có tài khoản? Vui lòng liên hệ <span className="font-semibold text-slate-700 dark:text-slate-300">Quản trị viên (Admin)</span> để được tạo và cấp quyền sử dụng.
           </div>
         </div>
       </div>

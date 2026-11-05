@@ -23,6 +23,7 @@ import {
   RotateCcw,
   Edit2,
   X,
+  Terminal,
 } from 'lucide-react';
 
 interface Props {
@@ -233,7 +234,7 @@ export const ChatWindow: React.FC<Props> = ({
                               </span>
                               {m.provider === 'step_progress' && (
                                 <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0">
-                                  Tiến độ từng bước (RAG)
+                                  Suy luận từng bước
                                 </span>
                               )}
                               {m.is_default && (
@@ -748,24 +749,91 @@ const ThinkingBox = ({ thinking, isLive = false }: { thinking: string; isLive?: 
   );
 };
 
-// Step-by-Step Execution Progress Timeline (Progress Gateway / RAG)
+// Helper to format ms into human readable ms, seconds, or minutes
+function formatDuration(ms: number): string {
+  if (ms <= 0) return '0ms';
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`;
+  }
+  if (ms < 60000) {
+    const sec = (ms / 1000).toFixed(ms >= 10000 ? 1 : 2);
+    return `${sec}s`;
+  }
+  const minutes = Math.floor(ms / 60000);
+  const remainingSec = Math.round((ms % 60000) / 1000);
+  if (remainingSec === 0) {
+    return `${minutes} phút`;
+  }
+  return `${minutes} phút ${remainingSec}s`;
+}
+
+// Collapsible SQL Query snippet box
+const SqlSnippetBox: React.FC<{ sql: string; stepId: string }> = ({ sql }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // ignore
+    }
+  };
+
+  const firstLine = sql.trim().split('\n')[0] || 'SQL Query';
+
+  return (
+    <div className="mt-1.5 rounded-xl border border-slate-800 bg-slate-900 text-emerald-400 font-mono text-[11px] overflow-hidden transition-all shadow-2xs">
+      <button
+        type="button"
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full flex items-center justify-between px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800/90 transition-colors text-left cursor-pointer"
+      >
+        <div className="flex items-center gap-2 min-w-0 pr-2">
+          <Terminal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span className="truncate font-semibold text-[10.5px] text-slate-300">
+            {isExpanded ? 'Câu lệnh SQL:' : `SQL: ${firstLine}`}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0 text-[10px] text-slate-400 font-sans">
+          <span>{isExpanded ? 'Thu gọn' : 'Xem SQL'}</span>
+          {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+        </div>
+      </button>
+
+      {isExpanded && (
+        <div className="relative p-2.5 pt-1.5 border-t border-slate-800/80 bg-slate-950/80 animate-in fade-in duration-150">
+          <pre className="whitespace-pre-wrap break-all leading-relaxed overflow-x-auto text-[11px] text-emerald-400 pr-8 font-mono">
+            {sql}
+          </pre>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="absolute top-2 right-2 p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors text-[10px] flex items-center gap-1 shadow-xs cursor-pointer"
+            title="Sao chép SQL"
+          >
+            {copied ? (
+              <Check className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <Copy className="w-3.5 h-3.5" />
+            )}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Step-by-Step Execution Progress Timeline
 const ProgressTimeline: React.FC<{
   steps: ProgressStep[];
   summary?: ProgressSummary;
   isLive?: boolean;
 }> = ({ steps, summary, isLive = false }) => {
   const [isOpen, setIsOpen] = useState(true);
-  const [copiedSqlId, setCopiedSqlId] = useState<string | null>(null);
-
-  const handleCopySql = async (id: string, sql: string) => {
-    try {
-      await navigator.clipboard.writeText(sql);
-      setCopiedSqlId(id);
-      setTimeout(() => setCopiedSqlId(null), 1800);
-    } catch {
-      // ignore
-    }
-  };
 
   const doneSteps = steps.filter((s) => s.status === 'done').length;
   const hasError = steps.some((s) => s.status === 'error');
@@ -795,14 +863,14 @@ const ProgressTimeline: React.FC<{
             </div>
           )}
           <span className="font-bold text-xs">
-            {isRunning ? 'Tiến độ thực hiện từng bước (Đang chạy...)' : 'Tiến trình thực hiện từng bước (Gateway / RAG)'}
+            {isRunning ? 'Suy luận từng bước (Đang chạy...)' : 'Suy luận từng bước'}
           </span>
           <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-medium bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-800/60">
             {doneSteps}/{steps.length} bước
           </span>
           {totalMs > 0 && (
             <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-              · {(totalMs / 1000).toFixed(2)}s
+              · {formatDuration(totalMs)}
             </span>
           )}
         </div>
@@ -867,7 +935,7 @@ const ProgressTimeline: React.FC<{
                     <div className="flex items-center gap-1.5 text-[10px] font-mono">
                       {step.duration_ms !== null && step.duration_ms !== undefined ? (
                         <span className="text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
-                          {step.duration_ms}ms
+                          {formatDuration(step.duration_ms)}
                         </span>
                       ) : isRunningStep ? (
                         <span className="text-indigo-600 dark:text-indigo-400 font-semibold animate-pulse">
@@ -893,23 +961,7 @@ const ProgressTimeline: React.FC<{
                   {step.detail && (
                     <div className="mt-1.5">
                       {isSql ? (
-                        <div className="relative group">
-                          <pre className="p-2 rounded-lg bg-slate-900 text-emerald-400 font-mono text-[11px] leading-relaxed overflow-x-auto whitespace-pre-wrap break-all border border-slate-800">
-                            {step.detail}
-                          </pre>
-                          <button
-                            type="button"
-                            onClick={() => handleCopySql(step.id, step.detail!)}
-                            className="absolute top-1.5 right-1.5 p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-opacity text-[10px] flex items-center gap-1 shadow-xs cursor-pointer"
-                            title="Sao chép SQL"
-                          >
-                            {copiedSqlId === step.id ? (
-                              <Check className="w-3 h-3 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-3 h-3" />
-                            )}
-                          </button>
-                        </div>
+                        <SqlSnippetBox sql={step.detail} stepId={step.id || `sql-${idx}`} />
                       ) : (
                         <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed font-mono">
                           {step.detail}
