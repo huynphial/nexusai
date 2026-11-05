@@ -412,7 +412,7 @@ async function seedDefaults() {
       'qwen3:8b',
       'http://localhost:8000/v1',
       '',
-      'Bạn là mô hình RAG nội bộ Local AI với khả năng phân tích yêu cầu, truy vấn SQL và tổng hợp kết quả.'
+      'Bạn là mô hình RAG nội bộ Local AI với khả năng phân tích yêu cầu, truy vấn cơ sở dữ liệu (Data Warehouse) và tổng hợp kết quả.'
     ]);
     const stepModelId = stepModelRes.lastID;
 

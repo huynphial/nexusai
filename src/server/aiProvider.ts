@@ -513,8 +513,8 @@ async function simulateStepProgress(
     start_ms: 12,
     end_ms: null,
     duration_ms: null,
-    detail: 'Đang xác định ý định truy vấn: cơ sở dữ liệu quan hệ hay tài liệu VectorDB...',
-    meta: { intent: 'SQL' },
+    detail: 'Đang xác định ý định truy vấn: Data Warehouse hay kho tài liệu...',
+    meta: { intent: 'Data Warehouse' },
   });
   if (isStreamWanted) await sleep(220);
   addOrUpdateStep({
@@ -525,26 +525,26 @@ async function simulateStepProgress(
     start_ms: 12,
     end_ms: 285,
     duration_ms: 273,
-    detail: 'Xác định intent: SQL (Tra cứu cơ sở dữ liệu hệ thống)',
-    meta: { intent: 'SQL' },
+    detail: 'Xác định ý định: Truy vấn cơ sở dữ liệu (Data Warehouse)',
+    meta: { intent: 'Data Warehouse' },
   });
 
   // Step 2: sql_generate
   addOrUpdateStep({
     id: 'sql_generate',
-    title: 'Chuyển yêu cầu thành SQL',
+    title: 'Tạo câu lệnh truy vấn dữ liệu',
     phase: 'prepare',
     status: 'running',
     start_ms: 290,
     end_ms: null,
     duration_ms: null,
-    detail: 'Đang sinh câu lệnh SQL từ cấu trúc lược đồ CSDL...',
+    detail: 'Đang sinh câu lệnh truy vấn từ cấu trúc Data Warehouse...',
   });
   if (isStreamWanted) await sleep(260);
   const sqlQuery = `SELECT id, name, category, status, created_at \nFROM system_records \nWHERE active = 1 \nORDER BY id DESC LIMIT 10;`;
   addOrUpdateStep({
     id: 'sql_generate',
-    title: 'Chuyển yêu cầu thành SQL',
+    title: 'Tạo câu lệnh truy vấn dữ liệu',
     phase: 'prepare',
     status: 'done',
     start_ms: 290,
@@ -557,7 +557,7 @@ async function simulateStepProgress(
   // Step 3: sql_guard
   addOrUpdateStep({
     id: 'sql_guard',
-    title: 'Kiểm tra an toàn SQL',
+    title: 'Kiểm tra an toàn truy vấn',
     phase: 'prepare',
     status: 'running',
     start_ms: 645,
@@ -567,20 +567,20 @@ async function simulateStepProgress(
   if (isStreamWanted) await sleep(100);
   addOrUpdateStep({
     id: 'sql_guard',
-    title: 'Kiểm tra an toàn SQL',
+    title: 'Kiểm tra an toàn truy vấn',
     phase: 'prepare',
     status: 'done',
     start_ms: 645,
     end_ms: 660,
     duration_ms: 15,
-    detail: 'Hợp lệ — chỉ câu lệnh SELECT, bảng trong whitelist, LIMIT ≤ 50',
+    detail: 'Hợp lệ — truy vấn đọc dữ liệu an toàn, danh mục bảng hợp lệ, giới hạn kết quả ≤ 50',
     meta: { kind: 'guard', passed: true },
   });
 
   // Step 4: sql_execute
   addOrUpdateStep({
     id: 'sql_execute',
-    title: 'Truy vấn cơ sở dữ liệu',
+    title: 'Truy vấn Data Warehouse',
     phase: 'prepare',
     status: 'running',
     start_ms: 665,
@@ -590,18 +590,18 @@ async function simulateStepProgress(
   if (isStreamWanted) await sleep(150);
   addOrUpdateStep({
     id: 'sql_execute',
-    title: 'Truy vấn cơ sở dữ liệu',
+    title: 'Truy vấn Data Warehouse',
     phase: 'prepare',
     status: 'done',
     start_ms: 665,
     end_ms: 705,
     duration_ms: 40,
-    detail: 'Thực thi thành công · Trả về 8 bản ghi phù hợp',
+    detail: 'Thực thi thành công · Trả về 8 bản ghi dữ liệu phù hợp',
     meta: { rows: 8 },
   });
 
   // Step 5: llm_think
-  const thinkingText = `[Phân tích truy vấn]: Người dùng hỏi: "${userQuery}".\n[Dữ liệu truy xuất]: Nhận 8 dòng bản ghi từ cơ sở dữ liệu.\n[Kế hoạch tổng hợp]: Định dạng bảng biểu trực quan và tóm lược các kết luận chính.`;
+  const thinkingText = `[Phân tích truy vấn]: Người dùng hỏi: "${userQuery}".\n[Dữ liệu truy xuất]: Nhận 8 dòng bản ghi từ Data Warehouse.\n[Kế hoạch tổng hợp]: Định dạng bảng biểu trực quan và tóm lược các kết luận chính.`;
   if (allowThinking) {
     addOrUpdateStep({
       id: 'llm_think',
@@ -641,14 +641,14 @@ async function simulateStepProgress(
 
   const responseText =
     `### Kết quả xử lý từ ${modelConfig.name} (${modelConfig.model_identifier})\n\n` +
-    `Hệ thống đã hoàn tất quy trình xử lý đa bước (Progress Gateway / RAG) cho yêu cầu: *"**${userQuery}**"*.\n\n` +
+    `Hệ thống đã hoàn tất quy trình xử lý đa bước (Suy luận từng bước / RAG) cho yêu cầu: *"**${userQuery}**"*.\n\n` +
     `#### Bảng tổng hợp dữ liệu truy vấn từ hệ thống:\n` +
     `| ID | Tên mục | Phân loại | Trạng thái | Thời gian |\n` +
     `|:---|:---|:---|:---|:---|\n` +
     `| #108 | Phân hệ xác thực tài khoản Local AI | Core System | Hoạt động | Hôm nay |\n` +
     `| #107 | Mô hình Qwen 3 8B Thinking SSE | AI Model | Hoạt động | Hôm nay |\n` +
     `| #106 | Rate Limit & Token Quota Gateway | Security | Hoạt động | Hôm qua |\n\n` +
-    `> 💡 **Ghi chú tiến độ:** Bạn đang tương tác với mô hình có hỗ trợ **Giao thức Tiến độ Từng bước (Step-by-Step Progress)**. Các sự kiện chuẩn bị dữ liệu, SQL Guard, CSDL và suy luận được hiển thị trực tiếp trên thanh tiến độ phía trên!`;
+    `> 💡 **Ghi chú tiến độ:** Bạn đang tương tác với mô hình có hỗ trợ **Suy luận từng bước (Step-by-Step Progress)**. Các sự kiện chuẩn bị dữ liệu, Kiểm tra an toàn, Data Warehouse và suy luận được hiển thị trực tiếp trên thanh tiến độ phía trên!`;
 
   if (isStreamWanted && onChunk) {
     const parts = [

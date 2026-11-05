@@ -497,8 +497,8 @@ export const ChatWindow: React.FC<Props> = ({
                         <ProgressTimeline steps={m.progress_steps} summary={m.progress_summary} isLive={false} />
                       )}
 
-                      {/* Thinking / Reasoning Box (if model produced thinking) */}
-                      {m.thinking_content && (
+                      {/* Thinking / Reasoning Box (Only if model produced thinking and NOT a step progress RAG model) */}
+                      {m.thinking_content && (!m.progress_steps || m.progress_steps.length === 0) && (
                         <ThinkingBox thinking={m.thinking_content} isLive={false} />
                       )}
 
@@ -592,13 +592,17 @@ export const ChatWindow: React.FC<Props> = ({
                 />
               )}
 
-              {/* Live Thinking Process (Streamed in realtime if model supports thinking and user has thinking enabled) */}
-              {thinkingEnabled && modelSupportsThinking && (streamingData.thinking || streamingData.isThinking) && (
-                <ThinkingBox
-                  thinking={streamingData.thinking || 'Đang phân tích câu hỏi và chuẩn bị các bước suy luận...'}
-                  isLive={streamingData.isThinking}
-                />
-              )}
+              {/* Live Thinking Process (Only show if model is NOT step_progress / has no progress steps) */}
+              {thinkingEnabled &&
+                modelSupportsThinking &&
+                selectedModel?.provider !== 'step_progress' &&
+                (!streamingData.progress_steps || streamingData.progress_steps.length === 0) &&
+                (streamingData.thinking || streamingData.isThinking) && (
+                  <ThinkingBox
+                    thinking={streamingData.thinking || 'Đang phân tích câu hỏi và chuẩn bị các bước suy luận...'}
+                    isLive={streamingData.isThinking}
+                  />
+                )}
 
               {streamingData.content ? (
                 <MarkdownViewer content={streamingData.content} />
@@ -785,7 +789,7 @@ const SqlSnippetBox: React.FC<{ sql: string; stepId: string }> = ({ sql }) => {
     }
   };
 
-  const firstLine = sql.trim().split('\n')[0] || 'SQL Query';
+  const firstLine = sql.trim().split('\n')[0] || 'Câu lệnh truy vấn';
 
   return (
     <div className="mt-1.5 rounded-xl border border-slate-800 bg-slate-900 text-emerald-400 font-mono text-[11px] overflow-hidden transition-all shadow-2xs">
@@ -797,11 +801,11 @@ const SqlSnippetBox: React.FC<{ sql: string; stepId: string }> = ({ sql }) => {
         <div className="flex items-center gap-2 min-w-0 pr-2">
           <Terminal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
           <span className="truncate font-semibold text-[10.5px] text-slate-300">
-            {isExpanded ? 'Câu lệnh SQL:' : `SQL: ${firstLine}`}
+            {isExpanded ? 'Câu lệnh truy vấn cơ sở dữ liệu:' : `Truy vấn CSDL: ${firstLine}`}
           </span>
         </div>
         <div className="flex items-center gap-1.5 shrink-0 text-[10px] text-slate-400 font-sans">
-          <span>{isExpanded ? 'Thu gọn' : 'Xem SQL'}</span>
+          <span>{isExpanded ? 'Thu gọn' : 'Xem câu lệnh'}</span>
           {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
         </div>
       </button>
@@ -815,7 +819,7 @@ const SqlSnippetBox: React.FC<{ sql: string; stepId: string }> = ({ sql }) => {
             type="button"
             onClick={handleCopy}
             className="absolute top-2 right-2 p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors text-[10px] flex items-center gap-1 shadow-xs cursor-pointer"
-            title="Sao chép SQL"
+            title="Sao chép câu lệnh"
           >
             {copied ? (
               <Check className="w-3.5 h-3.5 text-emerald-400" />
@@ -837,7 +841,11 @@ const ProgressTimeline: React.FC<{
 }> = ({ steps, summary, isLive = false }) => {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
-  const [isOpen, setIsOpen] = useState(true);
+  const [isOpen, setIsOpen] = useState(isLive);
+
+  useEffect(() => {
+    setIsOpen(isLive);
+  }, [isLive]);
 
   const doneSteps = steps.filter((s) => s.status === 'done').length;
   const hasError = steps.some((s) => s.status === 'error');
@@ -955,7 +963,7 @@ const ProgressTimeline: React.FC<{
 
                       {step.meta?.intent && (
                         <span className="text-purple-600 dark:text-purple-400 font-medium bg-purple-50 dark:bg-purple-950/40 px-1.5 py-0.5 rounded border border-purple-200/50 dark:border-purple-900/50">
-                          {step.meta.intent}
+                          {step.meta.intent === 'SQL' ? 'Data Warehouse' : step.meta.intent}
                         </span>
                       )}
                     </div>
@@ -970,7 +978,7 @@ const ProgressTimeline: React.FC<{
                         ) : (
                           <div className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 italic font-sans">
                             <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span>Chi tiết câu lệnh SQL chỉ dành cho tài khoản Quản trị viên (Admin).</span>
+                            <span>Chi tiết câu lệnh truy vấn cơ sở dữ liệu chỉ dành cho tài khoản Quản trị viên (Admin).</span>
                           </div>
                         )
                       ) : (
