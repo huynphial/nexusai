@@ -262,12 +262,8 @@ export async function generateAIChatResponse(
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'X-Progress-Mode': 'event',
       };
-
-      if (isStepProgress) {
-        // Send structured event progress header per protocol specification
-        headers['X-Progress-Mode'] = 'event';
-      }
 
       if (apiToken) {
         headers['Authorization'] = `Bearer ${apiToken}`;
@@ -318,6 +314,7 @@ export async function generateAIChatResponse(
       let accumulatedThinking = '';
       const accumulatedSteps: any[] = [];
       let accumulatedSummary: any = null;
+      let accumulatedChoices: any = undefined;
 
       if (isStreamWanted && response.body && onChunk) {
         const reader = response.body.getReader();
@@ -342,7 +339,36 @@ export async function generateAIChatResponse(
             if (trimmed.startsWith('data: ')) {
               try {
                 const parsed = JSON.parse(trimmed.substring(6));
-                const delta = parsed.choices?.[0]?.delta;
+
+                // A. Check if the parsed SSE chunk itself is a choices event (e.g. {"v": 1, "type": "choices", "options": [...]})
+                if (
+                  parsed.type === 'choices' ||
+                  parsed.type === 'choices_prompt' ||
+                  (parsed.options && Array.isArray(parsed.options) && parsed.prompt)
+                ) {
+                  accumulatedChoices = parsed;
+                  onChunk({ type: 'choices', choices: parsed });
+                  continue;
+                }
+
+                // B. Check top-level x_choices property (e.g. {"x_choices": {...}})
+                if (parsed.x_choices) {
+                  accumulatedChoices = parsed.x_choices;
+                  onChunk({ type: 'choices', choices: parsed.x_choices });
+                  continue;
+                }
+
+                // C. Check delta object in OpenAI-compatible SSE chunks
+                const delta = parsed.choices?.[0]?.delta || parsed.delta;
+
+                if (delta?.x_choices) {
+                  accumulatedChoices = delta.x_choices;
+                  onChunk({ type: 'choices', choices: delta.x_choices });
+                } else if (delta?.choices && typeof delta.choices === 'object' && Array.isArray(delta.choices.options)) {
+                  accumulatedChoices = delta.choices;
+                  onChunk({ type: 'choices', choices: delta.choices });
+                }
+
                 if (!delta) continue;
 
                 // 1. Check x_progress structured step/summary event
@@ -416,6 +442,14 @@ export async function generateAIChatResponse(
         accumulatedContent = extracted.cleanContent;
         accumulatedThinking = reasoningContent || extracted.thinkingContent || '';
 
+        if (data.x_choices) {
+          accumulatedChoices = data.x_choices;
+        } else if (messageObj?.x_choices) {
+          accumulatedChoices = messageObj.x_choices;
+        } else if (data.type === 'choices' && data.options) {
+          accumulatedChoices = data;
+        }
+
         // If non-streaming returns x_trace or steps
         if (data.x_trace && Array.isArray(data.x_trace.steps)) {
           accumulatedSteps.push(...data.x_trace.steps);
@@ -432,6 +466,7 @@ export async function generateAIChatResponse(
         thinking_content: allowThinking ? accumulatedThinking : undefined,
         progress_steps: accumulatedSteps.length > 0 ? accumulatedSteps : undefined,
         progress_summary: accumulatedSummary || undefined,
+        x_choices: accumulatedChoices || undefined,
         tokensUsed: totalTokens,
         latency_ms: latencyMs,
         tokens_per_second: tokensPerSecond,
