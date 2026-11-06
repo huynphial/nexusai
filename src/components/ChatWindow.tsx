@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from '../types';
 import { MarkdownViewer } from './MarkdownViewer';
+import { ChoicePromptBox } from './ChoicePromptBox';
 import { useAuth } from '../context/AuthContext';
 import {
   Send,
@@ -43,6 +44,7 @@ interface Props {
     isThinking?: boolean;
     progress_steps?: ProgressStep[];
     progress_summary?: ProgressSummary;
+    x_choices?: import('../types').ChoicePromptData;
   } | null;
   onCancelStream?: () => void;
   onTogglePauseStream?: () => void;
@@ -504,6 +506,15 @@ export const ChatWindow: React.FC<Props> = ({
 
                       <MarkdownViewer content={m.content} />
 
+                      {/* Interactive Choice Buttons (x_choices) */}
+                      {m.x_choices && (
+                        <ChoicePromptBox
+                          data={m.x_choices}
+                          onSelect={(reply) => onSendMessage(reply)}
+                          disabled={loading}
+                        />
+                      )}
+
                       {/* Performance Metrics & Action Buttons (Pure icon buttons, no text) */}
                       <div className="mt-3 pt-2 border-t border-slate-200/80 dark:border-slate-700/60 flex flex-wrap items-center justify-between gap-y-1.5 gap-x-3 text-[10px] text-slate-500 dark:text-slate-400 font-mono">
                         <div className="flex items-center flex-wrap gap-2.5">
@@ -615,6 +626,15 @@ export const ChatWindow: React.FC<Props> = ({
                       : 'Đang chuẩn bị phản hồi...'}
                   </span>
                 </div>
+              )}
+
+              {/* Interactive Choice Buttons during stream */}
+              {streamingData.x_choices && (
+                <ChoicePromptBox
+                  data={streamingData.x_choices}
+                  onSelect={(reply) => onSendMessage(reply)}
+                  disabled={loading}
+                />
               )}
             </div>
           </div>

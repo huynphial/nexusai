@@ -148,7 +148,7 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
     }
 
     const messages = await query(
-      `SELECT id, session_id, sender, content, thinking_content, progress_steps, tokens_used, latency_ms, tokens_per_second, created_at
+      `SELECT id, session_id, sender, content, thinking_content, progress_steps, x_choices, tokens_used, latency_ms, tokens_per_second, created_at
        FROM chat_messages WHERE session_id = ? ORDER BY id ASC`,
       [sessionId]
     );
@@ -159,6 +159,15 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
         ? (() => {
             try {
               return JSON.parse(m.progress_steps);
+            } catch {
+              return undefined;
+            }
+          })()
+        : undefined,
+      x_choices: m.x_choices
+        ? (() => {
+            try {
+              return JSON.parse(m.x_choices);
             } catch {
               return undefined;
             }
@@ -260,21 +269,24 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
         // Send chunk to client via SSE
         if (chunk.type === 'progress') {
           res.write(`data: ${JSON.stringify({ type: 'progress', step: chunk.step, summary: chunk.summary })}\n\n`);
+        } else if (chunk.type === 'choices') {
+          res.write(`data: ${JSON.stringify({ type: 'choices', choices: chunk.choices })}\n\n`);
         } else {
           res.write(`data: ${JSON.stringify({ type: chunk.type, text: chunk.text })}\n\n`);
         }
       }
     );
 
-    // Save assistant message to database with thinking content, progress steps & performance metrics
+    // Save assistant message to database with thinking content, progress steps, choices & performance metrics
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
         aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
+        aiResult.x_choices ? JSON.stringify(aiResult.x_choices) : null,
         aiResult.tokensUsed,
         aiResult.latency_ms,
         aiResult.tokens_per_second
@@ -302,6 +314,7 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       thinking_content: aiResult.thinking_content || null,
       progress_steps: aiResult.progress_steps || undefined,
       progress_summary: aiResult.progress_summary || undefined,
+      x_choices: aiResult.x_choices || undefined,
       tokens_used: aiResult.tokensUsed,
       latency_ms: aiResult.latency_ms,
       tokens_per_second: aiResult.tokens_per_second,
@@ -399,13 +412,14 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     const aiResult = await generateAIChatResponse(modelConfig, history);
 
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
         aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
+        aiResult.x_choices ? JSON.stringify(aiResult.x_choices) : null,
         aiResult.tokensUsed,
         aiResult.latency_ms,
         aiResult.tokens_per_second
@@ -435,6 +449,7 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
         thinking_content: aiResult.thinking_content || null,
         progress_steps: aiResult.progress_steps || undefined,
         progress_summary: aiResult.progress_summary || undefined,
+        x_choices: aiResult.x_choices || undefined,
         tokens_used: aiResult.tokensUsed,
         latency_ms: aiResult.latency_ms,
         tokens_per_second: aiResult.tokens_per_second,

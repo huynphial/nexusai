@@ -106,6 +106,27 @@ export interface ChatSession {
   model_identifier?: string;
 }
 
+export interface ChoiceOption {
+  label: string;
+  description?: string;
+  value: string;
+}
+
+export interface ChoicePromptData {
+  v?: number;
+  type?: 'choices' | string;
+  id?: string;
+  prompt?: string;
+  prefix?: string;
+  multiple?: boolean;
+  options: ChoiceOption[];
+  all?: {
+    label: string;
+    reply: string;
+  } | null;
+  note?: string;
+}
+
 export interface ChatMessage {
   id: number;
   session_id: number;
@@ -114,6 +135,7 @@ export interface ChatMessage {
   thinking_content?: string;
   progress_steps?: ProgressStep[];
   progress_summary?: ProgressSummary;
+  x_choices?: ChoicePromptData;
   tokens_used: number;
   latency_ms?: number;
   tokens_per_second?: number;

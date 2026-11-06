@@ -178,13 +178,19 @@ export async function initDatabase() {
         sender TEXT NOT NULL,
         content TEXT NOT NULL,
         thinking_content TEXT,
-        progress_steps TEXT,
+        x_choices TEXT,
         tokens_used INTEGER DEFAULT 0,
         latency_ms INTEGER DEFAULT 0,
         tokens_per_second REAL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    try {
+      await run(`ALTER TABLE chat_messages ADD COLUMN x_choices TEXT`);
+    } catch {
+      // Column might already exist
+    }
 
     // 7. Token Usage Logs table
     await run(`

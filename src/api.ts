@@ -85,10 +85,11 @@ export const api = {
     data: { session_id?: number; model_id?: number; prompt: string; enable_thinking?: boolean },
     callbacks: {
       onChunk: (chunk: {
-        type: 'thinking' | 'content' | 'progress';
+        type: 'thinking' | 'content' | 'progress' | 'choices';
         text?: string;
         step?: ProgressStep;
         summary?: ProgressSummary;
+        choices?: import('./types').ChoicePromptData;
       }) => void;
       onDone: (res: { session_id: number; message: ChatMessage; updated_quota?: any }) => void;
       onError: (err: string) => void;
@@ -137,7 +138,12 @@ export const api = {
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
           try {
             const parsed = JSON.parse(trimmed.substring(6));
-            if (parsed.type === 'thinking' || parsed.type === 'content' || parsed.type === 'progress') {
+            if (
+              parsed.type === 'thinking' ||
+              parsed.type === 'content' ||
+              parsed.type === 'progress' ||
+              parsed.type === 'choices'
+            ) {
               callbacks.onChunk(parsed);
             } else if (parsed.type === 'done') {
               callbacks.onDone(parsed);

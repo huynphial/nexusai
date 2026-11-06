@@ -143,6 +143,7 @@ function MainContent() {
     isThinking?: boolean;
     progress_steps?: ProgressStep[];
     progress_summary?: ProgressSummary;
+    x_choices?: import('./types').ChoicePromptData;
   } | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(true);
   const [isStreamPaused, setIsStreamPaused] = useState(false);
@@ -289,6 +290,16 @@ function MainContent() {
               isThinking: true,
               progress_steps: prev?.progress_steps,
               progress_summary: prev?.progress_summary,
+              x_choices: prev?.x_choices,
+            }));
+          } else if (chunk.type === 'choices') {
+            setStreamingData((prev) => ({
+              content: prev?.content || accumulatedContent,
+              thinking: prev?.thinking || accumulatedThinking,
+              isThinking: false,
+              progress_steps: prev?.progress_steps,
+              progress_summary: prev?.progress_summary,
+              x_choices: chunk.choices,
             }));
           } else {
             accumulatedContent += chunk.text || '';
@@ -298,6 +309,7 @@ function MainContent() {
               isThinking: false,
               progress_steps: prev?.progress_steps,
               progress_summary: prev?.progress_summary,
+              x_choices: prev?.x_choices,
             }));
           }
         },

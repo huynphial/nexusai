@@ -20,10 +20,11 @@ export interface AIModelConfig {
 }
 
 export interface StreamChunk {
-  type: 'thinking' | 'content' | 'progress';
+  type: 'thinking' | 'content' | 'progress' | 'choices';
   text?: string;
   step?: any;
   summary?: any;
+  choices?: any;
 }
 
 export interface AIResponse {
@@ -31,6 +32,7 @@ export interface AIResponse {
   thinking_content?: string;
   progress_steps?: any[];
   progress_summary?: any;
+  x_choices?: any;
   tokensUsed: number;
   latency_ms: number;
   tokens_per_second: number;
@@ -650,6 +652,36 @@ async function simulateStepProgress(
     `| #106 | Rate Limit & Token Quota Gateway | Security | Hoạt động | Hôm qua |\n\n` +
     `> 💡 **Ghi chú tiến độ:** Bạn đang tương tác với mô hình có hỗ trợ **Suy luận từng bước (Step-by-Step Progress)**. Các sự kiện chuẩn bị dữ liệu, Kiểm tra an toàn, Data Warehouse và suy luận được hiển thị trực tiếp trên thanh tiến độ phía trên!`;
 
+  // Check if user query matches keyword for service choice prompt demonstration
+  let choiceData: any = undefined;
+  if (/triệu phú|dịch vụ|chọn|gói|nhóm|lựa chọn|triuephu/i.test(userQuery)) {
+    choiceData = {
+      v: 1,
+      type: 'choices',
+      id: `chatcmpl-${Date.now()}`,
+      multiple: true,
+      prompt: 'Tôi tìm thấy 2 dịch vụ khớp với yêu cầu của bạn. Bạn muốn chọn dịch vụ nào?',
+      prefix: 'Chọn: ',
+      options: [
+        {
+          label: 'TRIEUPHUMAYMAN (TROTHANHTRIEUPHU)',
+          description: 'Nhóm Thông tin giải trí · Mã DCO0A3VMADVK485',
+          value: 'TRIEUPHUMAYMAN (TROTHANHTRIEUPHU) (DCO0A3VMADVK485)',
+        },
+        {
+          label: 'TRIEUPHUMOBILE',
+          description: 'Nhóm Thông tin giải trí · Mã DCO0A3VMADVK486',
+          value: 'TRIEUPHUMOBILE (DCO0A3VMADVK486)',
+        },
+      ],
+      all: {
+        label: 'Tất cả',
+        reply: 'tất cả',
+      },
+      note: 'Bạn có thể bấm trực tiếp một dịch vụ, chọn nhiều mục rồi bấm Xác nhận, hoặc bấm Tất cả.',
+    };
+  }
+
   if (isStreamWanted && onChunk) {
     const parts = [
       responseText.substring(0, 120),
@@ -659,6 +691,9 @@ async function simulateStepProgress(
     for (const p of parts) {
       onChunk({ type: 'content', text: p });
       await sleep(90);
+    }
+    if (choiceData) {
+      onChunk({ type: 'choices', choices: choiceData });
     }
   }
 
@@ -692,6 +727,7 @@ async function simulateStepProgress(
     thinking_content: allowThinking ? thinkingText : undefined,
     progress_steps: steps,
     progress_summary: summary,
+    x_choices: choiceData,
     tokensUsed: estimatedTokens,
     latency_ms: latencyMs,
     tokens_per_second: tokensPerSecond,
