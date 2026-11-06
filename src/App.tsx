@@ -345,7 +345,7 @@ function MainContent() {
   const selectedModelObj = availableModels.find((m) => m.id === selectedModelId);
 
   return (
-    <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans">
+    <div className="h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans overflow-hidden">
       {/* Top Navigation */}
       <Navbar
         activeView={activeView}
@@ -359,7 +359,7 @@ function MainContent() {
       {activeView === 'dashboard' && user?.role === 'admin' ? (
         <DashboardMain />
       ) : (
-        <div className="flex-1 flex overflow-hidden relative">
+        <div className="flex-1 flex overflow-hidden relative min-h-0">
           {/* Mobile Sidebar Toggle Button */}
           <button
             onClick={() => setSidebarMobileOpen(true)}

@@ -48,12 +48,12 @@ export const Sidebar: React.FC<Props> = ({
       )}
 
       <aside
-        className={`fixed lg:static inset-y-0 left-0 w-72 bg-slate-50 dark:bg-slate-950 border-r border-slate-200 dark:border-slate-800 flex flex-col z-40 transition-transform duration-200 ease-in-out ${
+        className={`fixed lg:static inset-y-0 left-0 w-72 h-full max-h-full min-h-0 bg-slate-50 dark:bg-slate-950 border-r border-slate-200 dark:border-slate-800 flex flex-col z-40 transition-transform duration-200 ease-in-out shrink-0 overflow-hidden ${
           isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
         {/* Top: New Chat Action */}
-        <div className="p-3 border-b border-slate-200 dark:border-slate-800">
+        <div className="p-3 border-b border-slate-200 dark:border-slate-800 shrink-0">
           <button
             onClick={() => {
               onNewChat();
@@ -67,7 +67,7 @@ export const Sidebar: React.FC<Props> = ({
         </div>
 
         {/* Search Session Bar */}
-        <div className="px-3 pt-1 pb-2">
+        <div className="px-3 pt-1 pb-2 shrink-0">
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
             <input
@@ -81,7 +81,7 @@ export const Sidebar: React.FC<Props> = ({
         </div>
 
         {/* Sessions List */}
-        <div className="flex-1 overflow-y-auto px-2 space-y-1">
+        <div className="flex-1 overflow-y-auto min-h-0 px-2 space-y-1">
           <div className="px-2 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
             Lịch sử chat ({filteredSessions.length})
           </div>

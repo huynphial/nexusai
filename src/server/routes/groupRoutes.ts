@@ -41,7 +41,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
   try {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
-    const { name, description, default_model_id, access_rules } = req.body;
+    const { name, description, default_model_id, enable_debug_thinking, access_rules } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Tên nhóm người dùng không được để trống.' });
@@ -53,8 +53,13 @@ router.post('/', async (req: CustomRequest, res: Response) => {
     }
 
     const resGroup = await run(
-      `INSERT INTO user_groups (name, description, default_model_id) VALUES (?, ?, ?)`,
-      [name.trim(), description ? description.trim() : '', default_model_id ? Number(default_model_id) : null]
+      `INSERT INTO user_groups (name, description, default_model_id, enable_debug_thinking) VALUES (?, ?, ?, ?)`,
+      [
+        name.trim(),
+        description ? description.trim() : '',
+        default_model_id ? Number(default_model_id) : null,
+        enable_debug_thinking ? 1 : 0
+      ]
     );
 
     const groupId = resGroup.lastID;
@@ -95,7 +100,7 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
     const groupId = parseInt(req.params.id, 10);
-    const { name, description, default_model_id, access_rules } = req.body;
+    const { name, description, default_model_id, enable_debug_thinking, access_rules } = req.body;
 
     const group = await getOne(`SELECT * FROM user_groups WHERE id = ?`, [groupId]);
     if (!group) {
@@ -106,10 +111,15 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       ? (default_model_id ? Number(default_model_id) : null)
       : group.default_model_id;
 
-    await run(`UPDATE user_groups SET name = ?, description = ?, default_model_id = ? WHERE id = ?`, [
+    const updatedDebugThinking = enable_debug_thinking !== undefined
+      ? (enable_debug_thinking ? 1 : 0)
+      : (group.enable_debug_thinking || 0);
+
+    await run(`UPDATE user_groups SET name = ?, description = ?, default_model_id = ?, enable_debug_thinking = ? WHERE id = ?`, [
       name ? name.trim() : group.name,
       description !== undefined ? description.trim() : group.description,
       updatedDefaultModelId,
+      updatedDebugThinking,
       groupId
     ]);
 

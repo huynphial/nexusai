@@ -17,7 +17,7 @@ router.post('/login', async (req: CustomRequest, res: Response) => {
 
     const user = await getOne(
       `
-      SELECT u.*, g.name as group_name
+      SELECT u.*, g.name as group_name, COALESCE(g.enable_debug_thinking, 0) as enable_debug_thinking
       FROM users u
       LEFT JOIN user_groups g ON u.user_group_id = g.id
       WHERE LOWER(u.email) = LOWER(?)
@@ -47,7 +47,8 @@ router.post('/login', async (req: CustomRequest, res: Response) => {
       name: user.name,
       role: user.role,
       user_group_id: user.user_group_id,
-      group_name: user.group_name || 'Chưa xếp nhóm'
+      group_name: user.group_name || 'Chưa xếp nhóm',
+      enable_debug_thinking: Boolean(user.enable_debug_thinking || user.role === 'admin')
     };
 
     const token = generateToken(authenticatedUser);
@@ -79,7 +80,7 @@ router.get('/me', authenticateToken, async (req: CustomRequest, res: Response) =
     const userId = req.user?.id;
     const user = await getOne(
       `
-      SELECT u.id, u.name, u.email, u.role, u.user_group_id, u.status, u.created_at, g.name as group_name
+      SELECT u.id, u.name, u.email, u.role, u.user_group_id, u.status, u.created_at, g.name as group_name, COALESCE(g.enable_debug_thinking, 0) as enable_debug_thinking
       FROM users u
       LEFT JOIN user_groups g ON u.user_group_id = g.id
       WHERE u.id = ?
@@ -90,6 +91,8 @@ router.get('/me', authenticateToken, async (req: CustomRequest, res: Response) =
     if (!user) {
       return res.status(404).json({ error: 'Không tìm thấy người dùng.' });
     }
+
+    user.enable_debug_thinking = Boolean(user.enable_debug_thinking || user.role === 'admin');
 
     res.json({ user });
   } catch (err: any) {

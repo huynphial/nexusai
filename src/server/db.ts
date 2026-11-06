@@ -122,9 +122,17 @@ export async function initDatabase() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
         description TEXT,
+        default_model_id INTEGER,
+        enable_debug_thinking INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    try {
+      await run(`ALTER TABLE user_groups ADD COLUMN enable_debug_thinking INTEGER DEFAULT 0`);
+    } catch {
+      // Column might already exist
+    }
 
     // 3. AI Models table
     await run(`
@@ -267,7 +275,7 @@ async function seedDefaults() {
   let adminGroup = await getOne(`SELECT * FROM user_groups WHERE name LIKE '%Quản Trị%' OR name LIKE '%Admin%' LIMIT 1`);
   if (!adminGroup) {
     const res = await run(
-      `INSERT INTO user_groups (name, description) VALUES (?, ?)`,
+      `INSERT INTO user_groups (name, description, enable_debug_thinking) VALUES (?, ?, 1)`,
       [
         'Nhóm Quản Trị (Admin)',
         'Quyền quản trị toàn diện hệ thống Local AI, toàn quyền truy cập Dashboard, cấu hình mô hình, hạn ngạch và chat.'
@@ -276,7 +284,7 @@ async function seedDefaults() {
     adminGroup = { id: res.lastID, name: 'Nhóm Quản Trị (Admin)' };
   } else {
     await run(
-      `UPDATE user_groups SET name = ?, description = ? WHERE id = ?`,
+      `UPDATE user_groups SET name = ?, description = ?, enable_debug_thinking = 1 WHERE id = ?`,
       [
         'Nhóm Quản Trị (Admin)',
         'Quyền quản trị toàn diện hệ thống Local AI, toàn quyền truy cập Dashboard, cấu hình mô hình, hạn ngạch và chat.',
@@ -288,7 +296,7 @@ async function seedDefaults() {
   let userGroup = await getOne(`SELECT * FROM user_groups WHERE (name LIKE '%Người Dùng%' OR name LIKE '%User%' OR name LIKE '%General%') AND id != ? LIMIT 1`, [adminGroup.id]);
   if (!userGroup) {
     const res = await run(
-      `INSERT INTO user_groups (name, description) VALUES (?, ?)`,
+      `INSERT INTO user_groups (name, description, enable_debug_thinking) VALUES (?, ?, 0)`,
       [
         'Nhóm Người Dùng (User)',
         'Nhóm người dùng thông thường, chỉ được phép sử dụng giao diện Chat LLM với các mô hình được phân quyền, không truy cập giao diện quản trị.'
@@ -297,7 +305,7 @@ async function seedDefaults() {
     userGroup = { id: res.lastID, name: 'Nhóm Người Dùng (User)' };
   } else {
     await run(
-      `UPDATE user_groups SET name = ?, description = ? WHERE id = ?`,
+      `UPDATE user_groups SET name = ?, description = ?, enable_debug_thinking = 0 WHERE id = ?`,
       [
         'Nhóm Người Dùng (User)',
         'Nhóm người dùng thông thường, chỉ được phép sử dụng giao diện Chat LLM với các mô hình được phân quyền, không truy cập giao diện quản trị.',

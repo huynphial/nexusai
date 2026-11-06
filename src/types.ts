@@ -5,6 +5,7 @@ export interface User {
   role: 'admin' | 'user';
   user_group_id: number;
   group_name?: string;
+  enable_debug_thinking?: boolean;
   status: 'active' | 'suspended';
   created_at?: string;
   total_tokens?: number;
@@ -16,6 +17,7 @@ export interface UserGroup {
   description: string;
   default_model_id?: number | null;
   default_model_name?: string | null;
+  enable_debug_thinking?: number | boolean;
   created_at?: string;
   member_count?: number;
   access_rules?: GroupModelAccess[];

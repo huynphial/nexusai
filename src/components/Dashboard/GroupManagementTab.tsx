@@ -23,6 +23,7 @@ export const GroupManagementTab: React.FC<Props> = ({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [defaultModelId, setDefaultModelId] = useState<number | null>(null);
+  const [enableDebugThinking, setEnableDebugThinking] = useState(false);
   // Access rules matrix mapping model_id -> rule
   const [accessRulesMap, setAccessRulesMap] = useState<Record<number, GroupModelAccess>>({});
   const [loading, setLoading] = useState(false);
@@ -32,6 +33,7 @@ export const GroupManagementTab: React.FC<Props> = ({
     setName('');
     setDescription('');
     setDefaultModelId(allModels[0]?.id || null);
+    setEnableDebugThinking(false);
     // Default matrix with all active models enabled
     const initialMap: Record<number, GroupModelAccess> = {};
     allModels.forEach((m) => {
@@ -53,6 +55,7 @@ export const GroupManagementTab: React.FC<Props> = ({
     setName(g.name);
     setDescription(g.description || '');
     setDefaultModelId(g.default_model_id || null);
+    setEnableDebugThinking(Boolean(g.enable_debug_thinking));
 
     const currentMap: Record<number, GroupModelAccess> = {};
     if (g.access_rules) {
@@ -109,6 +112,7 @@ export const GroupManagementTab: React.FC<Props> = ({
           name,
           description,
           default_model_id: defaultModelId,
+          enable_debug_thinking: enableDebugThinking ? 1 : 0,
           access_rules: rulesArray,
         });
       } else {
@@ -116,6 +120,7 @@ export const GroupManagementTab: React.FC<Props> = ({
           name,
           description,
           default_model_id: defaultModelId,
+          enable_debug_thinking: enableDebugThinking ? 1 : 0,
           access_rules: rulesArray,
         });
       }
@@ -329,6 +334,29 @@ export const GroupManagementTab: React.FC<Props> = ({
                 <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
                   Chỉ những mô hình được bật phân quyền trong ma trận bên dưới mới có thể gán làm mô hình mặc định.
                 </p>
+              </div>
+
+              {/* Debug Thinking Toggle */}
+              <div className="p-3 rounded-xl bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200/80 dark:border-purple-900/60 flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-bold text-xs text-purple-900 dark:text-purple-200">
+                    Chế độ Debug Thinking (Hiển thị chi tiết API Models)
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-tight">
+                    Cho phép người dùng nhóm này bật/xem thông số kỹ thuật chi tiết của API Model (Prompt hệ thống, Model ID, Latency, Token/s). Nhóm Quản Trị mặc định bật.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEnableDebugThinking(!enableDebugThinking)}
+                  className={`px-3 py-1.5 rounded-xl font-bold text-xs transition-all border shrink-0 cursor-pointer ${
+                    enableDebugThinking
+                      ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700'
+                  }`}
+                >
+                  {enableDebugThinking ? 'BẬT DEBUG' : 'TẮT DEBUG'}
+                </button>
               </div>
 
               {/* Rate Limit Matrix Section */}

@@ -27,6 +27,7 @@ import {
   X,
   Terminal,
   Lock,
+  Bug,
 } from 'lucide-react';
 
 interface Props {
@@ -69,6 +70,7 @@ export const ChatWindow: React.FC<Props> = ({
   thinkingEnabled = true,
   onToggleThinking,
 }) => {
+  const { user } = useAuth();
   const [prompt, setPrompt] = useState('');
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<number | null>(null);
@@ -162,7 +164,7 @@ export const ChatWindow: React.FC<Props> = ({
   }, []);
 
   return (
-    <div className="flex-1 flex flex-col h-[calc(100vh-3.5rem)] bg-white dark:bg-slate-900 relative">
+    <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-white dark:bg-slate-900 relative">
       {/* Active Model Header Bar: Custom Dropdown Menu with Quotas & Thinking Toggle */}
       <div className="h-14 border-b border-slate-200 dark:border-slate-800 px-4 flex items-center justify-between bg-slate-50/70 dark:bg-slate-900/70 backdrop-blur-md">
         <div className="flex items-center gap-3">
@@ -504,6 +506,11 @@ export const ChatWindow: React.FC<Props> = ({
                         <ThinkingBox thinking={m.thinking_content} isLive={false} />
                       )}
 
+                      {/* Debug Thinking Panel (If enabled for user group / admin) */}
+                      {(user?.enable_debug_thinking || user?.role === 'admin') && selectedModel && (
+                        <DebugThinkingPanel model={selectedModel} msg={m} />
+                      )}
+
                       <MarkdownViewer content={m.content} />
 
                       {/* Interactive Choice Buttons (x_choices) */}
@@ -528,7 +535,7 @@ export const ChatWindow: React.FC<Props> = ({
                           {m.tokens_per_second !== undefined && m.tokens_per_second > 0 && (
                             <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-semibold" title="Tốc độ sinh token">
                               <Gauge className="w-3 h-3 text-emerald-500" />
-                              {m.tokens_per_second} tk/s
+                              {m.tokens_per_second} token/s
                             </span>
                           )}
 
@@ -614,6 +621,19 @@ export const ChatWindow: React.FC<Props> = ({
                     isLive={streamingData.isThinking}
                   />
                 )}
+
+              {/* Debug Thinking Panel (If enabled for user group / admin) */}
+              {(user?.enable_debug_thinking || user?.role === 'admin') && selectedModel && (
+                <DebugThinkingPanel
+                  model={selectedModel}
+                  msg={{
+                    latency_ms: 0,
+                    tokens_per_second: 0,
+                    tokens_used: 0,
+                    progress_summary: streamingData.progress_summary,
+                  }}
+                />
+              )}
 
               {streamingData.content ? (
                 <MarkdownViewer content={streamingData.content} />
@@ -769,6 +789,78 @@ const ThinkingBox = ({ thinking, isLive = false }: { thinking: string; isLive?: 
       {isOpen && (
         <div className="p-3 pt-1 border-t border-indigo-100 dark:border-indigo-950/60 font-mono text-[11px] leading-relaxed text-slate-600 dark:text-slate-400 whitespace-pre-wrap max-h-60 overflow-y-auto bg-white/40 dark:bg-slate-950/30">
           {thinking}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Collapsible Debug Thinking Panel for Admins / User Groups with Debug Thinking enabled
+const DebugThinkingPanel = ({
+  model,
+  msg,
+}: {
+  model?: ModelWithQuota;
+  msg: { latency_ms?: number; tokens_per_second?: number; tokens_used?: number; progress_summary?: any };
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (!model) return null;
+
+  return (
+    <div className="mb-2.5 rounded-xl border border-purple-200/80 dark:border-purple-900/60 bg-purple-50/50 dark:bg-purple-950/30 overflow-hidden text-xs transition-all shadow-2xs">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between px-3 py-1.5 text-purple-800 dark:text-purple-300 font-semibold hover:bg-purple-100/50 dark:hover:bg-purple-900/40 transition-colors cursor-pointer text-[11px]"
+      >
+        <div className="flex items-center gap-1.5">
+          <Bug className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+          <span>Thông tin Kỹ thuật Debug (API Models & System Prompt)</span>
+        </div>
+        <div className="flex items-center gap-1 text-[10px] text-purple-600 dark:text-purple-400">
+          <span>{isOpen ? 'Thu gọn' : 'Xem Debug'}</span>
+          {isOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        </div>
+      </button>
+
+      {isOpen && (
+        <div className="p-3 border-t border-purple-200/60 dark:border-purple-900/50 bg-white/70 dark:bg-slate-950/80 font-mono text-[10.5px] space-y-2 text-slate-700 dark:text-slate-300">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <span className="text-slate-400">Tên mô hình:</span>{' '}
+              <b className="text-purple-700 dark:text-purple-300">{model.name}</b>
+            </div>
+            <div>
+              <span className="text-slate-400">Model ID:</span>{' '}
+              <b className="text-indigo-600 dark:text-indigo-400">{model.model_identifier}</b>
+            </div>
+            <div>
+              <span className="text-slate-400">Provider:</span>{' '}
+              <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 font-semibold">
+                {model.provider}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-400">Tốc độ sinh token:</span>{' '}
+              <b className="text-emerald-600 dark:text-emerald-400">{msg.tokens_per_second || 0} token/s</b>
+            </div>
+          </div>
+
+          {model.system_prompt && (
+            <div className="pt-1.5 border-t border-slate-200 dark:border-slate-800">
+              <div className="text-slate-400 font-semibold mb-0.5">System Prompt đã gửi tới API:</div>
+              <div className="p-2 rounded bg-slate-100 dark:bg-slate-900/90 text-slate-800 dark:text-slate-200 leading-relaxed max-h-28 overflow-y-auto whitespace-pre-wrap break-all text-[10px]">
+                {model.system_prompt}
+              </div>
+            </div>
+          )}
+
+          {msg.progress_summary?.trace_id && (
+            <div className="text-[10px] text-slate-400 pt-0.5">
+              Trace ID: <span className="font-mono text-purple-600 dark:text-purple-400">{msg.progress_summary.trace_id}</span>
+            </div>
+          )}
         </div>
       )}
     </div>
