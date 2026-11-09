@@ -56,10 +56,19 @@ export function extractThinkingFromContent(rawText: string): { cleanContent: str
   return { cleanContent: rawText };
 }
 
+export interface UserInfoTracing {
+  name?: string;
+  email?: string;
+  id?: number | string;
+  role?: string;
+}
+
 export async function generateAIChatResponse(
   modelConfig: AIModelConfig,
   messages: ChatMessageItem[],
-  onChunk?: (chunk: StreamChunk) => void
+  onChunk?: (chunk: StreamChunk) => void,
+  userInfo?: UserInfoTracing,
+  sessionId?: number | string
 ): Promise<AIResponse> {
   const systemPrompt = modelConfig.system_prompt || 'Bạn là trợ lý trí tuệ nhân tạo Local AI, hỗ trợ người dùng chu đáo bằng Tiếng Việt.';
   const timeoutSeconds = modelConfig.timeout_seconds && modelConfig.timeout_seconds > 0 ? modelConfig.timeout_seconds : 60;
@@ -260,10 +269,33 @@ export async function generateAIChatResponse(
         requestPayload.think = true;
       }
 
+      if (sessionId !== undefined && sessionId !== null) {
+        requestPayload.session_id = sessionId;
+      }
+      if (userInfo?.id !== undefined && userInfo?.id !== null) {
+        requestPayload.user_id = userInfo.id;
+      }
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'X-Progress-Mode': 'event',
       };
+
+      if (userInfo?.name) {
+        headers['X-User-Name'] = encodeURIComponent(userInfo.name);
+      }
+      if (userInfo?.email) {
+        headers['X-User-Email'] = userInfo.email;
+      }
+      if (userInfo?.id !== undefined && userInfo?.id !== null) {
+        headers['X-User-Id'] = String(userInfo.id);
+      }
+      if (userInfo?.role) {
+        headers['X-User-Role'] = userInfo.role;
+      }
+      if (sessionId !== undefined && sessionId !== null) {
+        headers['X-Session-Id'] = String(sessionId);
+      }
 
       if (apiToken) {
         headers['Authorization'] = `Bearer ${apiToken}`;

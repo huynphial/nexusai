@@ -1,0 +1,442 @@
+# Tích hợp Chat UI: hiển thị tiến độ từng bước + biểu đồ thời gian
+
+Gateway ghi lại từng công đoạn xử lý của mỗi request và đẩy về Chat UI **ngay khi từng bước xảy ra**
+(không đợi đến cuối):
+
+```
+Phân tích yêu cầu → Tra cứu kho tài liệu nội bộ       → Chờ trợ lý → Trợ lý suy nghĩ → Trợ lý soạn câu trả lời
+                  → Phân tích yêu cầu truy vấn → Kiểm tra an toàn → Tra cứu từ trung tâm dữ liệu ┘
+```
+
+Mỗi bước có: tên, trạng thái (`running` / `done` / `error`), thời điểm bắt đầu/kết thúc, thời lượng và chi tiết
+(số dòng tìm thấy, tên tài liệu tìm được...). Từ đó UI vẽ được danh sách bước hoặc biểu đồ thời gian (Gantt).
+
+## 1. Chọn mức tích hợp
+
+| Mức | UI cần sửa? | Bạn thấy gì | Dùng khi |
+|---|---|---|---|
+| **A. Khung thinking** | Không | Danh sách bước + biểu đồ chữ trong khung "thinking" | UI của bạn đã hiện thinking của model; muốn có ngay |
+| **B. Sự kiện `x_progress`** | Có (thêm ~20 dòng JS) | Timeline đồ họa, thanh thời gian chạy trực tiếp | UI tự viết hoặc fork được |
+| **C. Open WebUI** | Không sửa code UI, thêm 1 Function | Mỗi bước là một dòng trạng thái; thinking thành khối `<think>` | Dùng Open WebUI |
+
+Xem nhanh mức B ngay không cần cài gì: `python -m scripts.demo_stack` rồi mở `http://127.0.0.1:8000/demo`
+(dùng Ollama giả, có độ trễ để thấy thanh thời gian chạy). Khi gateway chạy thật, trang `/demo` cũng dùng được
+với Ollama thật.
+
+## 2. Cấu hình (`.env`)
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `PROGRESS_MODE` | `thinking` | `off` · `thinking` · `event` · `both` |
+| `STATUS_FIELD` | `reasoning` | Tên trường thinking mà UI của bạn hiển thị (chế độ `thinking`) |
+| `STATUS_INCLUDE_SQL` | `false` | `true` = hiện câu truy vấn và lỗi kỹ thuật trong tiến độ (dành cho kỹ thuật viên) |
+| `PROGRESS_CHART` | `true` | Chế độ `thinking`: thêm biểu đồ thời gian dạng chữ |
+| `PROGRESS_CHART_WIDTH` | `28` | Độ rộng thanh của biểu đồ chữ |
+| `PROGRESS_DETAIL_MAX` | `300` | Độ dài tối đa phần chi tiết mỗi bước |
+| `TRACE_KEEP` | `200` | Số trace giữ trong bộ nhớ cho `GET /v1/traces/{id}` |
+| `DEMO_UI` | `true` | Bật `/demo` và `/static/progress-timeline.js` |
+
+**Ghi đè theo từng request** bằng header `X-Progress-Mode: event` (giá trị không hợp lệ bị bỏ qua).
+Nhờ vậy cùng một gateway có thể phục vụ UI cũ (mặc định `thinking`) và UI mới (gửi header `event`).
+
+> Ngôn ngữ: mọi tiêu đề/chi tiết tiến độ dùng từ phổ thông (không nhắc SQL, MySQL, VectorDB, Ollama). Mặc định tiến độ
+> **không** chứa câu truy vấn hay lỗi kỹ thuật; đặt `STATUS_INCLUDE_SQL=true` nếu kỹ thuật viên cần xem (khi đó `meta.kind="sql"`).
+
+## 3. Mức A: không sửa UI (chế độ `thinking`)
+
+Đặt `PROGRESS_MODE=thinking` và `STATUS_FIELD` đúng tên trường thinking của UI. Gateway ghi vào trường này,
+trước khi model bắt đầu suy luận:
+
+````
+- ⏳ Phân tích yêu cầu…
+- ✔ Phân tích yêu cầu · 524ms — Cần số liệu → tra cứu từ trung tâm dữ liệu
+- ⏳ Phân tích yêu cầu truy vấn…
+- ✔ Phân tích yêu cầu truy vấn · 504ms — Đã soạn xong yêu cầu truy vấn
+- ⏳ Kiểm tra an toàn truy vấn…
+- ✔ Kiểm tra an toàn truy vấn · 0ms — Hợp lệ — chỉ đọc dữ liệu, đúng phạm vi được phép
+- ⏳ Tra cứu từ trung tâm dữ liệu…
+- ✔ Tra cứu từ trung tâm dữ liệu · 1ms — Tìm thấy 1 dòng dữ liệu
+
+**Dòng thời gian** — chuẩn bị dữ liệu mất 1.0s
+```text
+Phân tích yêu cầu                  │██████████████░░░░░░░░░░░░░░│ 524ms
+Phân tích yêu cầu truy vấn         │░░░░░░░░░░░░░░██████████████│ 504ms
+Kiểm tra an toàn truy vấn          │░░░░░░░░░░░░░░░░░░░░░░░░░░░█│ 0ms
+Tra cứu từ trung tâm dữ liệu       │░░░░░░░░░░░░░░░░░░░░░░░░░░░█│ 1ms
+```
+````
+
+Cách biết `STATUS_FIELD` là gì: gọi thẳng Ollama với model thinking rồi xem tên trường trong `delta`:
+
+```bash
+curl -N http://localhost:11434/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3:8b","stream":true,"think":true,"messages":[{"role":"user","content":"1+1?"}]}'
+```
+
+Thấy `"reasoning":"..."` thì để `reasoning`; thấy `"reasoning_content"` thì đổi tương ứng.
+
+Giới hạn của mức A: luồng thinking chỉ **nối thêm** được, nên không có thanh chạy trực tiếp; mỗi bước hiện thành
+hai dòng (bắt đầu, kết thúc) và biểu đồ chữ chỉ có sau khi giai đoạn chuẩn bị xong. UI nào không hiển thị
+thinking của model thì sẽ không thấy gì.
+
+## 4. Mức B: UI tự viết (sự kiện `x_progress`)
+
+### 4.1. Nhúng component có sẵn
+
+Gateway phục vụ sẵn file `GET /static/progress-timeline.js` (ES module, không phụ thuộc thư viện). Sao chép file này
+vào dự án UI hoặc import trực tiếp:
+
+```html
+<div id="progress"></div>
+<script type="module">
+import { ProgressTimeline, readChatStream } from "http://<gateway>:8000/static/progress-timeline.js";
+
+const timeline = new ProgressTimeline(document.getElementById("progress"));
+
+async function ask(messages) {
+  timeline.reset();
+  const res = await fetch("http://<gateway>:8000/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Progress-Mode": "event",               // yêu cầu sự kiện có cấu trúc
+      // "Authorization": "Bearer <API_KEY>",   // nếu gateway đặt API_KEY
+    },
+    body: JSON.stringify({ model: "qwen3:8b", stream: true, think: true, messages }),
+  });
+  await readChatStream(res, {
+    onProgress:  (p) => timeline.push(p),       // vẽ timeline
+    onReasoning: (t) => appendThinking(t),      // thinking của model
+    onContent:   (t) => appendAnswer(t),        // câu trả lời
+  });
+}
+</script>
+```
+
+Tùy biến giao diện bằng CSS variables trên phần tử gốc: `--pt-fg`, `--pt-muted`, `--pt-track`, `--pt-accent`,
+`--pt-ok`, `--pt-err`, `--pt-font`, `--pt-mono`. Component tự theo chế độ sáng/tối của hệ thống.
+
+### 4.2. Dùng với React / Vue / Svelte
+
+`ProgressTimeline` là lớp thuần JS gắn vào một phần tử DOM, nên bọc trong effect:
+
+```jsx
+// React
+function Progress({ events }) {            // events: mảng x_progress nhận được cho lượt này
+  const ref = useRef(null), tl = useRef(null);
+  useEffect(() => { tl.current = new ProgressTimeline(ref.current); return () => tl.current.reset(); }, []);
+  useEffect(() => { tl.current.reset(); events.forEach((e) => tl.current.push(e)); }, [events]);
+  return <div ref={ref} />;
+}
+```
+
+Nếu muốn tự vẽ, chỉ cần đọc sự kiện theo mục 5; mọi thứ cần thiết nằm trong JSON.
+
+### 4.3. Lấy lại timeline sau khi tải lại trang
+
+Mỗi response có header `X-Trace-Id` (trùng `id` của completion). Lưu id này cùng tin nhắn, về sau:
+
+```js
+const trace = await (await fetch(`${BASE}/v1/traces/${traceId}`, { headers })).json();
+timeline.load(trace);
+```
+
+Gateway giữ `TRACE_KEEP` trace gần nhất **trong bộ nhớ** (mất khi khởi động lại). Muốn lưu lâu dài, UI nên tự lưu
+`summary` nhận được ở cuối luồng.
+
+Lưu ý CORS: nếu UI chạy ở origin khác, đặt `CORS_ORIGINS` đúng origin của UI. Header `X-Trace-Id` đã được cho phép đọc.
+
+## 5. Đặc tả giao thức `x_progress`
+
+Sự kiện nằm trong `choices[0].delta.x_progress` của các chunk SSE chuẩn `chat.completion.chunk`
+(client OpenAI thông thường bỏ qua trường lạ). Chunk đầu tiên luôn có `delta.role = "assistant"`.
+
+**Sự kiện bước** (mỗi lần bước bắt đầu, cập nhật, hoặc kết thúc; luôn là ảnh chụp đầy đủ của bước):
+
+```json
+{"v":1,"type":"step","trace_id":"chatcmpl-ab7a…","step":{
+  "id":"sql_generate","title":"Phân tích yêu cầu truy vấn","phase":"prepare","status":"done",
+  "start_ms":742,"end_ms":1447,"duration_ms":705,
+  "detail":"Đã soạn xong yêu cầu truy vấn",
+  "meta":{"kind":"query"}}}
+```
+
+**Sự kiện tổng kết** (một lần, ngay trước chunk `finish_reason`):
+
+```json
+{"v":1,"type":"summary","trace_id":"chatcmpl-ab7a…","created":1762300000,"done":true,"total_ms":3290,"steps":[ … ]}
+```
+
+| Trường | Ý nghĩa |
+|---|---|
+| `id` | Định danh bước, duy nhất trong trace. Bước lặp lại có hậu tố: `sql_generate#2` |
+| `phase` | `prepare` (tra cứu dữ liệu) hoặc `generate` (trợ lý trả lời) |
+| `status` | `running` → `done` hoặc `error` |
+| `start_ms`, `end_ms`, `duration_ms` | Mili-giây tính từ lúc gateway nhận request. `end_ms`/`duration_ms` = `null` khi đang chạy |
+| `detail` | Một dòng mô tả kết quả; bước lỗi thì là lý do |
+| `meta` | Dữ liệu thêm. `kind:"sql"` (chỉ khi `STATUS_INCLUDE_SQL=true`) = `detail` là câu truy vấn, nên hiển thị dạng code; `kind:"query"` = mô tả thường; `rows`, `intent`, `hits[{source,score}]` |
+
+Các `id` hiện có:
+
+| `id` | Tiêu đề | Khi nào |
+|---|---|---|
+| `datetime` | Kiểm tra ngày hiện tại | Luôn có khi bật RAG; `meta` có `today`, `yesterday`, `data_through`, `current_month_has_data`... |
+| `rewrite` | Hiểu câu hỏi theo ngữ cảnh cuộc trò chuyện | Câu hỏi nối tiếp (có lịch sử) |
+| `route` | Phân tích yêu cầu | Luôn có khi bật RAG; `meta.intent` = `SQL`/`DOCS`/`NONE`/`CATALOG` |
+| `catalog_list` | Tra danh mục dịch vụ | Câu hỏi liệt kê; gateway trả lời luôn, không gọi Ollama |
+| `entities` | Xác định dịch vụ bạn nhắc tới | Nhánh SQL; `meta.resolved`, `meta.ambiguous` |
+| `vector_search` | Tra cứu kho tài liệu nội bộ | Nhánh tài liệu |
+| `sql_generate` | Phân tích yêu cầu truy vấn | Nhánh SQL |
+| `sql_guard` | Kiểm tra an toàn truy vấn | Nhánh SQL; `error` nếu bị từ chối |
+| `sql_execute` | Tra cứu từ trung tâm dữ liệu | Nhánh SQL; `meta.rows` |
+| `llm_wait` | Chờ trợ lý phản hồi | Từ lúc gửi yêu cầu đến khi trợ lý bắt đầu phản hồi; `meta.model` là model đang dùng |
+| `llm_think` | Trợ lý đang suy nghĩ | Chỉ khi model có thinking |
+| `llm_answer` | Trợ lý đang soạn câu trả lời | Từ phần nội dung đầu tiên đến hết |
+| `llm_generate` | Trợ lý soạn câu trả lời | Chỉ ở chế độ không stream |
+
+**Từ chối ngoài phạm vi.** Yêu cầu riêng tư/không liên quan công việc nhận câu từ chối cố định, `meta.intent` của bước `route` là
+`OFFTOPIC` (hoặc `meta.rule=true` nếu bị luật chặn), luồng cũng không có bước `llm_*`.
+
+**Trả lời trực tiếp (không có `llm_*`).** Câu hỏi liệt kê dịch vụ/nhóm và lời nhắc "chọn dịch vụ nào" do gateway
+tự trả lời, không gọi Ollama; luồng vẫn là SSE chuẩn (`content` + `finish_reason: stop` + `[DONE]`) kèm `summary`.
+Khi gateway hỏi lại, UI hỗ trợ thì vẽ **nút chọn** (mục 5b), UI không hỗ trợ thì người dùng trả lời bằng số thứ tự hoặc tên/mã ở
+tin nhắn kế tiếp. Gateway **không lưu trạng thái**: nó đọc lại
+danh sách đã đánh số trong tin nhắn trợ lý trước đó, nên Chat UI phải gửi lại đúng nội dung markdown gốc của tin nhắn
+đó trong `messages` (mọi UI phổ biến đều làm vậy) và không được sửa chữ trong tin nhắn hỏi lại.
+
+Nên xử lý theo **`id` bước chưa biết trước** (hiển thị `title` thay vì ánh xạ cứng) để UI vẫn đúng khi gateway
+thêm bước mới. Khi SQL lỗi, gateway tự thử lại (`SQL_MAX_RETRIES`): sẽ thấy `sql_generate#2`, `sql_guard#2`...
+
+Thứ tự điển hình của một luồng SSE:
+
+```
+data: {…"delta":{"role":"assistant","x_progress":{"type":"step","step":{"id":"route","status":"running",…}}}}
+data: {…"delta":{"x_progress":{"type":"step","step":{"id":"route","status":"done",…}}}}
+…                                  (các bước sql_* hoặc vector_search)
+data: {…"delta":{"x_progress":{"type":"step","step":{"id":"llm_wait","status":"running",…}}}}
+data: {…"delta":{"reasoning":"…"}}  ← thinking của model (nguyên văn từ Ollama)
+data: {…"delta":{"content":"Doanh"}} ← câu trả lời
+data: {…"delta":{"x_progress":{"type":"summary",…}}}
+data: {…"choices":[{"delta":{…},"finish_reason":"stop"}]}
+data: [DONE]
+```
+
+Không stream (`"stream": false`): response JSON có thêm trường `x_trace` (cùng dạng với `GET /v1/traces/{id}`),
+trừ khi chế độ là `off`.
+
+## 5b. Lựa chọn dạng nút (`x_choices`)
+
+Khi cần người dùng chọn (nhiều dịch vụ/nhóm trùng tên), ngoài đoạn chữ có danh sách đánh số (luôn có, để UI không hỗ trợ vẫn dùng được
+và để gateway đọc lại ở lượt sau), gateway gửi thêm một sự kiện trong `delta.x_choices` **sau phần nội dung** (ở chế độ không stream: trường `x_choices` cấp cao nhất
+của phản hồi). Mặc định luôn gửi (`CHOICES_MODE=always`; client chuẩn bỏ qua trường lạ). `auto` = chỉ khi tiến độ ở chế độ
+`event`/`both`, `off` = không gửi; header `X-Choices: on|off` ghi đè từng request.
+
+> **Quan trọng:** gateway chỉ *gửi dữ liệu* nút chọn. **Chat UI phải có code đọc `delta.x_choices` rồi vẽ nút** (xem `ChoicePrompt`
+> bên dưới). Chat UI chưa sửa sẽ chỉ hiện đoạn chữ đánh số, đúng như thiết kế dự phòng. Chưa thấy nút thì xem mục "Chẩn đoán" cuối mục này.
+
+```json
+{"v":1,"type":"choices","id":"chatcmpl-ab7a…","multiple":true,
+ "prompt":"Tôi tìm thấy 2 dịch vụ khớp với “triệu phú”. Bạn muốn chọn dịch vụ nào?",
+ "prefix":"Chọn: ",
+ "options":[
+   {"label":"TRIEUPHUMAYMAN(TROTHANHTRIEUPHU)","description":"Nhóm Thông tin giải trí · mã DCO0A3VMADVK485","value":"TRIEUPHUMAYMAN(TROTHANHTRIEUPHU) (DCO0A3VMADVK485)"},
+   {"label":"TRIEUPHUMOBILE","description":"Nhóm Thông tin giải trí · mã DCO0A3VMADVK486","value":"TRIEUPHUMOBILE (DCO0A3VMADVK486)"}],
+ "all":{"label":"Tất cả","reply":"tất cả"},"note":""}
+```
+
+| Trường | Ý nghĩa |
+|---|---|
+| `prompt` | Câu hỏi hiển thị phía trên nút |
+| `options[].label` / `description` | Chữ trên nút / dòng phụ (nhóm, mã) |
+| `options[].value` | Giá trị đưa vào câu trả lời |
+| `prefix` | Tiền tố câu trả lời: `Chọn: ` (dịch vụ) hoặc `Chọn nhóm: ` (nhóm) |
+| `multiple` | Cho phép chọn nhiều mục |
+| `all` | Nút "Tất cả" (`null` nếu danh sách bị cắt bớt) và câu trả lời tương ứng |
+| `note` | Ghi chú, ví dụ còn mục chưa hiển thị |
+
+**Khi người dùng bấm nút, UI gửi một tin nhắn người dùng bình thường** (không có API riêng, không cần session phía server):
+
+- bấm một mục: `prefix + value`, ví dụ `Chọn: TRIEUPHUMOBILE (DCO0A3VMADVK486)`
+- chọn nhiều mục: `prefix + value1 + "; " + value2`
+- nút Tất cả: `all.reply` (`tất cả`)
+
+Gateway nhận ra mã dịch vụ/tên nhóm trong tin nhắn đó, ghép lại với câu hỏi gốc trong lịch sử và chạy tiếp. Người dùng gõ tay `2`, `1, 2`
+hoặc `tất cả` cũng vẫn được. Yêu cầu với UI: gửi lại **nguyên văn** tin nhắn hỏi lại của trợ lý trong `messages` (gateway đọc danh sách từ đó).
+
+Component có sẵn:
+
+```js
+import { ProgressTimeline, ChoicePrompt, readChatStream } from "http://<gateway>:8000/static/progress-timeline.js";
+const choices = new ChoicePrompt(document.querySelector("#choices"), {
+  onSelect: (reply) => sendMessage(reply),   // gửi `reply` như tin nhắn người dùng, rồi stream tiếp
+});
+await readChatStream(res, { onProgress: (p) => tl.push(p), onContent: appendAnswer, onChoices: (c) => choices.show(c) });
+```
+
+`ChoicePrompt` hiển thị mỗi mục là một nút (bấm là gửi ngay), kèm "Chọn nhiều mục" (tích rồi Xác nhận) và "Tất cả"; sau khi chọn thì khoá nút.
+Muốn tự vẽ (React/Vue...), chỉ cần đọc `x_choices` như bảng trên. Trang `/demo` là ví dụ chạy được.
+
+### Chẩn đoán khi không thấy nút
+
+Mỗi lần gateway hỏi lại, log (mức `INFO`, `LOG_LEVEL=INFO`) ghi một dòng như:
+
+```
+HỎI LẠI người dùng chọn: 2 lựa chọn (Tôi tìm thấy 2 dịch vụ khớp với “MCA”…) | gửi x_choices=True vì CHOICES_MODE=always | X-Progress-Mode=None X-Choices=None User-Agent='…' | payload={…}
+Đã gửi chunk x_choices tới client (2 nút)
+```
+
+Đọc như sau:
+- `gửi x_choices=False` → gateway **không** gửi; lý do nằm ngay sau chữ "vì" (`CHOICES_MODE=off`, `auto` mà UI không gửi `X-Progress-Mode: event`, hoặc header `X-Choices: off`). Sửa `.env` hoặc thêm header.
+- `gửi x_choices=True` và có dòng "Đã gửi chunk" → phía gateway đã đủ; nếu UI vẫn chỉ hiện chữ thì **UI chưa có code xử lý `x_choices`** (hoặc một proxy/UI trung gian đã lọc trường lạ khỏi SSE). Kiểm tra bằng curl:
+  `curl -N <gateway>/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"...","stream":true,"messages":[{"role":"user","content":"doanh thu <tên dịch vụ trùng>"}]}' | grep x_choices`
+- Không có dòng "HỎI LẠI" nào → câu hỏi không đi qua nhánh hỏi lại (xem các dòng `Intent=` phía trên).
+
+## 5c. Truyền thông tin người dùng và session (tuỳ chọn, để nối Phoenix với dữ liệu router)
+
+Phần này **không bắt buộc**: không gửi gì thì gateway vẫn chạy bình thường. Nếu Chat UI gửi thêm thông tin dưới đây,
+mọi span trong Phoenix (khi bật `TELEMETRY_ENABLED`, xem `integration/PHOENIX.md`) sẽ mang:
+
+| Thuộc tính Phoenix | Nội dung | Lấy từ |
+|---|---|---|
+| `user.id` | `Nguyễn Văn A (anha@abc.vn)` (tên + email; thiếu phần nào bỏ phần đó, thiếu cả hai thì dùng id) | header `X-User-Name`, `X-User-Email` (hoặc `X-User-Id`) |
+| `session.id` | id cuộc trò chuyện, gom mọi lượt của cùng một hội thoại | header `X-Session-Id` / `X-Chat-Id` |
+
+Cùng giá trị này có trong log của gateway (`Request trace_id=… user=… session=…`) và trong metadata của span `chat`
+(`gateway_trace_id` trùng header phản hồi `X-Trace-Id`), nên tra qua lại giữa Phoenix và dữ liệu router bằng `session` hoặc `trace_id`.
+
+### Các header gateway đọc
+
+| Header | Ý nghĩa | Header thay thế (Open WebUI) |
+|---|---|---|
+| `X-User-Name` | họ tên hiển thị | `X-OpenWebUI-User-Name` |
+| `X-User-Email` | email | `X-OpenWebUI-User-Email` |
+| `X-User-Id` | id/username nội bộ (có thể thay cho tên+email) | `X-OpenWebUI-User-Id`, hoặc trường `user` trong body |
+| `X-User-Role` | vai trò (chỉ vào metadata) | `X-OpenWebUI-User-Role` |
+| `X-Session-Id` | id cuộc trò chuyện | `X-Chat-Id`, `X-OpenWebUI-Chat-Id` |
+
+Gateway còn thử trường trong body nếu không có header: `session_id`, `chat_id`, `conversation_id`, `metadata.chat_id`.
+**Không gửi session nào:** gateway tự tạo id ổn định `auto-xxxxxxxxxxxxxxxx` từ user + câu hỏi đầu tiên của cuộc trò chuyện
+(các lượt cùng hội thoại vẫn gom chung; tắt bằng `TELEMETRY_SESSION_FALLBACK=false`). Gửi id thật vẫn chính xác hơn.
+
+**Mã hoá giá trị:** header HTTP chỉ chứa ký tự ASCII, còn tên tiếng Việt thì không. Hãy mã hoá phần trăm (`encodeURIComponent`
+trong JS, `urllib.parse.quote(v, safe="")` trong Python); gateway tự giải mã. Giá trị ASCII thuần (id, email, session)
+không cần mã hoá.
+
+### Mức B: UI tự viết
+
+```js
+const headers = {
+  "Content-Type": "application/json",
+  "X-Progress-Mode": "event",
+  // tuỳ chọn — chỉ thêm khi biết thông tin:
+  "X-User-Name": encodeURIComponent(user.fullName),   // "Nguyễn Văn A"
+  "X-User-Email": user.email,                          // "anha@abc.vn"
+  "X-Session-Id": conversation.id,                     // id cuộc trò chuyện của UI
+};
+const res = await fetch(`${BASE}/v1/chat/completions`, { method: "POST", headers, body: JSON.stringify(payload) });
+```
+Đừng gửi tên hay email ở trường lạ của body: dùng header (hoặc trường `user` chuẩn của OpenAI cho id).
+Nếu UI chạy trên trình duyệt ở origin khác, `CORS_ORIGINS` đã cho phép mọi header (gateway cấu hình `allow_headers=*`).
+
+### Mức C: Open WebUI (pipe `open_webui_pipe.py`)
+
+Pipe mới tự lấy `__user__` (id, name, email, role) và `__metadata__["chat_id"]` rồi gửi `X-User-*` và `X-Chat-Id` kèm mã hoá %XX.
+Không phải cấu hình gì thêm. Có hai Valve để tắt:
+- `SEND_USER_INFO` (mặc định bật): tắt thì không gửi gì về người dùng/cuộc trò chuyện.
+- `SEND_USER_EMAIL` (mặc định bật): tắt thì chỉ gửi tên, không gửi email.
+
+Nếu bạn **không dùng pipe** mà cho Open WebUI gọi gateway như một kết nối OpenAI thông thường (Admin Panel → Settings →
+Connections), đặt biến môi trường `ENABLE_FORWARD_USER_INFO_HEADERS=true` cho Open WebUI; nó sẽ gửi `X-OpenWebUI-User-Id/Name/Email/Role`
+và `X-OpenWebUI-Chat-Id`, gateway đọc được ngay. **Chưa kiểm chứng trên Open WebUI thật**: tên header và việc mã hoá giá trị
+có thể khác theo phiên bản.
+
+### UI khác (LibreChat, LobeChat...)
+Tìm cấu hình "custom headers" của kết nối OpenAI-compatible và thêm `X-User-Email`, `X-Session-Id`... nếu UI cho phép chèn biến
+người dùng/cuộc trò chuyện (tên biến tuỳ UI). Nếu UI chỉ cho header tĩnh thì gửi được vai trò chung, không phân biệt từng người;
+khi đó cần lớp cầu nối như pipe ở mục 6.
+
+### Riêng tư
+Email là thông tin định danh nên **không bị che** trong `user.id`. Nếu không muốn đưa email sang Phoenix: đặt
+`TELEMETRY_MASK_USER_EMAIL=true` ở gateway (user.id còn `Tên ([email])`), hoặc không gửi `X-User-Email` từ phía UI.
+
+### Kiểm tra
+```bash
+curl -N -i http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -H 'X-User-Name: Nguy%E1%BB%85n%20V%C4%83n%20A' -H 'X-User-Email: anha@abc.vn' -H 'X-Session-Id: chat-001' \
+  -d '{"model":"qwen3:8b","stream":true,"messages":[{"role":"user","content":"Doanh thu tháng này?"}]}'
+```
+Xem log gateway (`LOG_LEVEL=INFO`) phải có dòng `Request trace_id=chatcmpl-… user=Nguyễn Văn A (anha@abc.vn) session=chat-001 …`,
+rồi mở Phoenix, tìm session `chat-001` hoặc user đó.
+
+## 6. Mức C: Open WebUI
+
+Open WebUI không có chỗ để hiển thị một trường tùy ý như `x_progress`, nên dùng một **Function (Pipe)** làm cầu nối:
+pipe gọi gateway với `X-Progress-Mode: event`, đổi mỗi bước thành sự kiện trạng thái của Open WebUI
+và bọc thinking của model trong `<think>...</think>`.
+
+1. Open WebUI → **Admin Panel → Functions → "+"**, dán toàn bộ `integration/open_webui_pipe.py`, **Save**, bật công tắc.
+2. Bấm biểu tượng bánh răng (**Valves**) của function:
+   - `GATEWAY_URL`: địa chỉ gateway, **không có `/v1`**. Nếu Open WebUI chạy trong Docker và gateway chạy trên
+     máy chủ, dùng `http://host.docker.internal:8000` (Linux cần thêm `--add-host=host.docker.internal:host-gateway`)
+     hoặc IP máy chủ.
+   - `API_KEY`: trùng `API_KEY` của gateway nếu có đặt.
+3. Chọn trong danh sách model: mỗi model Ollama xuất hiện thành một mục **"RAG · tên-model"**. Chọn model, bật thinking
+   như bình thường.
+
+Pipe tự bỏ tiền tố `<function_id>.` mà Open WebUI gắn vào tên model rồi chuyển phần còn lại sang gateway,
+nên model và các tham số thinking bạn chọn được giữ nguyên.
+
+Với Open WebUI nên giữ `PASSTHROUGH_PREFIXES="### Task:"` trong `.env` để các request phụ (đặt tiêu đề, gợi ý
+câu hỏi tiếp theo) không bị đưa qua bước tra cứu.
+
+**Lựa chọn trong Open WebUI:** khi gateway hỏi lại (nhiều dịch vụ trùng tên), pipe gửi các lựa chọn thành **gợi ý bấm được**
+(follow-up, sự kiện `chat:message:follow_ups`); bấm vào gợi ý là gửi đúng câu trả lời. Tắt bằng Valve `SHOW_CHOICES`.
+Open WebUI không có "nút chọn" riêng cho pipe nên đây là cách gần nhất; **chưa kiểm chứng trên Open WebUI thật**. Nếu phiên bản của bạn
+không hiển thị gợi ý, người dùng vẫn trả lời được bằng số thứ tự trong danh sách chữ.
+
+**Mức độ kiểm chứng:** pipe đã được kiểm thử tự động với gateway thật và một emitter giả (bản đồ sự kiện, bọc
+`<think>`, bỏ tiền tố model, báo lỗi). **Chưa được thử trên một bản Open WebUI thực tế.** API của Functions
+(`pipes()`, `pipe(...)`, `__event_emitter__`) và cách UI nhận `<think>` có thể khác giữa các phiên bản; nếu có chỗ
+không khớp, xem tài liệu Functions của phiên bản bạn đang chạy.
+
+## 7. UI khác (LibreChat, LobeChat, Chatbox...)
+
+Mọi UI gọi được `/v1/chat/completions` đều dùng được **mức A** nếu nó hiển thị trường thinking/reasoning của
+model; hãy đặt `STATUS_FIELD` theo tên trường mà UI đó đọc. Tên trường và việc UI có hiển thị hay không **khác nhau
+theo UI và phiên bản**, nên thử bằng `curl` rồi bằng chính UI. Muốn timeline đồ họa trong các UI này thì phải dùng
+mức B (sửa/fork UI) hoặc viết một lớp cầu nối tương tự pipe ở mục 6.
+
+## 8. Kiểm tra từng lớp bằng curl
+
+```bash
+# Mức A: xem các dòng tiến độ nằm trong trường thinking
+curl -N http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3:8b","stream":true,"messages":[{"role":"user","content":"Doanh thu tháng này?"}]}'
+
+# Mức B: xem sự kiện x_progress và header X-Trace-Id
+curl -N -i http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -H 'X-Progress-Mode: event' \
+  -d '{"model":"qwen3:8b","stream":true,"messages":[{"role":"user","content":"Doanh thu tháng này?"}]}'
+
+# Lấy lại trace
+curl http://localhost:8000/v1/traces/<trace_id>
+```
+
+Dấu hiệu stream đúng: các dòng `x_progress` hiện **lần lượt trong lúc chờ**, không đợi đến khi model trả lời xong
+mới đổ ra một lượt.
+
+## 9. Sự cố thường gặp
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
+|---|---|---|
+| Không thấy tiến độ nào | `PROGRESS_MODE=off`, hoặc UI không hiển thị trường thinking | Kiểm tra bằng `curl`; đặt `STATUS_FIELD` đúng tên |
+| Mọi thứ đến một lúc ở cuối | Reverse proxy (nginx...) đang gom bộ đệm | `proxy_buffering off;` (gateway đã gửi `X-Accel-Buffering: no`); nếu có nén gzip cho `text/event-stream` thì tắt |
+| Trình duyệt báo CORS | UI ở origin khác | Đặt `CORS_ORIGINS=https://ui-cua-ban`; tránh `*` khi có `API_KEY` |
+| Chữ tiến độ lẫn vào câu trả lời | UI đẩy trường thinking vào nội dung | Dùng mức B/C, hoặc `PROGRESS_MODE=off` |
+| Phoenix không hiện tên/email user (`user=None` trong log) | UI chưa gửi header `X-User-*` (hoặc Open WebUI chưa bật `ENABLE_FORWARD_USER_INFO_HEADERS`) | Xem mục 5c; kiểm bằng curl có `-H 'X-User-Name: …'` |
+| `session.id` có dạng `auto-…` | UI không gửi id cuộc trò chuyện | Gửi `X-Session-Id` (mục 5c) |
+| Tên tiếng Việt lỗi/ không gửi được | Header HTTP chỉ nhận ASCII | Mã hoá %XX giá trị `X-User-Name` |
+| `/v1/traces/{id}` trả 404 | Đã quá `TRACE_KEEP` hoặc gateway vừa khởi động lại | Lưu `summary` ở phía UI |
+| Timeline kẹt ở "đang chạy" | Luồng bị ngắt giữa chừng (không nhận được `summary`) | Gọi `timeline.finish()` trong `onDone` và khi bắt lỗi; bước còn treo sẽ được đánh dấu lỗi "Luồng bị ngắt" |
+| Pipe Open WebUI báo không gọi được gateway | `GATEWAY_URL` sai (localhost trong Docker là chính container) | Dùng `host.docker.internal` hoặc IP máy chủ |
+| Bước `llm_think` không bao giờ xuất hiện | Model không có thinking, hoặc tên trường thinking lạ | Gateway nhận `reasoning`, `reasoning_content`, `thinking`; kiểm tra bằng `curl` tới Ollama |

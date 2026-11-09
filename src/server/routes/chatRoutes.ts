@@ -262,6 +262,13 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
   history.reverse();
 
   try {
+    const userInfo = {
+      name: req.user?.name,
+      email: req.user?.email,
+      id: req.user?.id,
+      role: req.user?.role,
+    };
+
     const aiResult = await generateAIChatResponse(
       modelConfig,
       history,
@@ -274,7 +281,9 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
         } else {
           res.write(`data: ${JSON.stringify({ type: chunk.type, text: chunk.text })}\n\n`);
         }
-      }
+      },
+      userInfo,
+      currentSessionId
     );
 
     // Save assistant message to database with thinking content, progress steps, choices & performance metrics
@@ -408,8 +417,15 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     );
     history.reverse();
 
+    const userInfo = {
+      name: req.user?.name,
+      email: req.user?.email,
+      id: req.user?.id,
+      role: req.user?.role,
+    };
+
     // Call AI provider
-    const aiResult = await generateAIChatResponse(modelConfig, history);
+    const aiResult = await generateAIChatResponse(modelConfig, history, undefined, userInfo, currentSessionId);
 
     const assistantMsgRes = await run(
       `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, tokens_used, latency_ms, tokens_per_second)
