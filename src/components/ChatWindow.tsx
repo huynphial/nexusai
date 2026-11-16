@@ -100,14 +100,12 @@ export const ChatWindow: React.FC<Props> = ({
   };
 
   const handleCopy = async (id: number, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
       setCopiedId(id);
       setTimeout(() => {
         setCopiedId((prev) => (prev === id ? null : prev));
       }, 1800);
-    } catch (err) {
-      console.error('Failed to copy to clipboard', err);
     }
   };
 
@@ -877,6 +875,56 @@ const DebugThinkingPanel = ({
   );
 };
 
+// Cross-environment clipboard helper (supports HTTPS, HTTP intranet, and restricted iframes)
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Clipboard API may be blocked in non-HTTPS contexts or iframes without clipboard-write permission
+    }
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.width = '2em';
+    textarea.style.height = '2em';
+    textarea.style.padding = '0';
+    textarea.style.border = 'none';
+    textarea.style.outline = 'none';
+    textarea.style.boxShadow = 'none';
+    textarea.style.background = 'transparent';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+
+    const selection = document.getSelection();
+    const savedRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+
+    if (savedRange && selection) {
+      selection.removeAllRanges();
+      selection.addRange(savedRange);
+    }
+
+    return copied;
+  } catch (err) {
+    console.error('Failed to copy text to clipboard:', err);
+    return false;
+  }
+}
+
 // Helper to format ms into human readable ms, seconds, or minutes
 function formatDuration(ms: number): string {
   if (ms <= 0) return '0ms';
@@ -902,12 +950,10 @@ const SqlSnippetBox: React.FC<{ sql: string; stepId: string }> = ({ sql }) => {
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(sql);
+    const ok = await copyTextToClipboard(sql);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // ignore
     }
   };
 
