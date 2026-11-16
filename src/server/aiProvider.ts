@@ -220,7 +220,8 @@ export async function generateAIChatResponse(
         }
       }
 
-      if (!apiToken && !isStepProgress) {
+      const isOpenAIDefault = !modelConfig.api_url || modelConfig.api_url.includes('api.openai.com');
+      if (!apiToken && !isStepProgress && isOpenAIDefault) {
         clearTimeout(timer);
         const simulatedThinking = allowThinking
           ? `[Phân tích yêu cầu]: Mô hình "${modelConfig.name}" đang xử lý truy vấn của người dùng trong hệ thống Local AI.\n[Kế hoạch phản hồi]: Cung cấp giải thích chi tiết và hướng dẫn cấu hình API Token cho quản trị viên.`
@@ -257,16 +258,30 @@ export async function generateAIChatResponse(
         };
       }
 
-      const endpointUrl = `${baseUrl}/chat/completions`;
+      let endpointUrl = `${baseUrl}/chat/completions`;
+      if (/\/(chat\/completions|api\/chat|api\/generate)$/i.test(baseUrl)) {
+        endpointUrl = baseUrl;
+      } else if (/\/api$/i.test(baseUrl)) {
+        endpointUrl = `${baseUrl}/chat`;
+      }
+      const isOllamaNative = /\/api\/(chat|generate)$/i.test(endpointUrl);
+
       const requestPayload: any = {
         model: modelId,
         messages: fullMessages,
-        temperature: 0.7,
         stream: !!isStreamWanted,
       };
 
-      if (allowThinking) {
-        requestPayload.think = true;
+      if (isOllamaNative) {
+        requestPayload.options = { temperature: 0.7 };
+        requestPayload.think = allowThinking;
+      } else {
+        requestPayload.temperature = 0.7;
+        if (allowThinking) {
+          requestPayload.think = true;
+        } else if (!baseUrl.includes('api.openai.com')) {
+          requestPayload.think = false;
+        }
       }
 
       if (sessionId !== undefined && sessionId !== null) {
@@ -347,13 +362,182 @@ export async function generateAIChatResponse(
       const accumulatedSteps: any[] = [];
       let accumulatedSummary: any = null;
       let accumulatedChoices: any = undefined;
+      let reportedTotalTokens = 0;
 
       if (isStreamWanted && response.body && onChunk) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
-
         let inThinkingTag = false;
+        let tagBuffer = '';
+
+        const getPartialSuffixMatch = (str: string, tag: string): number => {
+          const maxLen = Math.min(str.length, tag.length - 1);
+          for (let len = maxLen; len > 0; len--) {
+            if (tag.startsWith(str.slice(-len))) {
+              return len;
+            }
+          }
+          return 0;
+        };
+
+        const emitContentWithThinkTags = (chunkText: string) => {
+          tagBuffer += chunkText;
+          while (tagBuffer.length > 0) {
+            if (inThinkingTag) {
+              const closeIdx = tagBuffer.indexOf('</think>');
+              if (closeIdx !== -1) {
+                const thinkPart = tagBuffer.slice(0, closeIdx);
+                if (thinkPart && allowThinking) {
+                  accumulatedThinking += thinkPart;
+                  onChunk({ type: 'thinking', text: thinkPart });
+                }
+                tagBuffer = tagBuffer.slice(closeIdx + '</think>'.length);
+                inThinkingTag = false;
+              } else {
+                const partialLen = getPartialSuffixMatch(tagBuffer, '</think>');
+                const safeLen = tagBuffer.length - partialLen;
+                if (safeLen > 0) {
+                  const thinkPart = tagBuffer.slice(0, safeLen);
+                  if (allowThinking) {
+                    accumulatedThinking += thinkPart;
+                    onChunk({ type: 'thinking', text: thinkPart });
+                  }
+                  tagBuffer = tagBuffer.slice(safeLen);
+                }
+                break;
+              }
+            } else {
+              const openIdx = tagBuffer.indexOf('<think>');
+              if (openIdx !== -1) {
+                const contentPart = tagBuffer.slice(0, openIdx);
+                if (contentPart) {
+                  accumulatedContent += contentPart;
+                  onChunk({ type: 'content', text: contentPart });
+                }
+                tagBuffer = tagBuffer.slice(openIdx + '<think>'.length);
+                inThinkingTag = true;
+              } else {
+                const partialLen = getPartialSuffixMatch(tagBuffer, '<think>');
+                const safeLen = tagBuffer.length - partialLen;
+                if (safeLen > 0) {
+                  const contentPart = tagBuffer.slice(0, safeLen);
+                  accumulatedContent += contentPart;
+                  onChunk({ type: 'content', text: contentPart });
+                  tagBuffer = tagBuffer.slice(safeLen);
+                }
+                break;
+              }
+            }
+          }
+        };
+
+        const processStreamLine = (rawLine: string) => {
+          const trimmed = rawLine.trim();
+          if (!trimmed || trimmed.startsWith(':')) return;
+
+          const jsonStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+          if (!jsonStr || jsonStr === '[DONE]') return;
+          if (!jsonStr.startsWith('{')) return;
+
+          try {
+            const parsed = JSON.parse(jsonStr);
+
+            // Track reported token counts if available
+            if (typeof parsed.usage?.total_tokens === 'number') {
+              reportedTotalTokens = parsed.usage.total_tokens;
+            } else if (typeof parsed.eval_count === 'number' || typeof parsed.prompt_eval_count === 'number') {
+              reportedTotalTokens = (parsed.prompt_eval_count || 0) + (parsed.eval_count || 0);
+            }
+
+            // A. Check if the parsed chunk itself is a choices event (e.g. {"v": 1, "type": "choices", "options": [...]})
+            if (
+              parsed.type === 'choices' ||
+              parsed.type === 'choices_prompt' ||
+              (parsed.options && Array.isArray(parsed.options) && parsed.prompt)
+            ) {
+              accumulatedChoices = parsed;
+              onChunk({ type: 'choices', choices: parsed });
+              return;
+            }
+
+            // B. Check top-level x_choices property (e.g. {"x_choices": {...}})
+            if (parsed.x_choices) {
+              accumulatedChoices = parsed.x_choices;
+              onChunk({ type: 'choices', choices: parsed.x_choices });
+              return;
+            }
+
+            // C. Extract active message/delta object across OpenAI SSE & Ollama NDJSON formats
+            const delta = parsed.choices?.[0]?.delta || parsed.delta;
+            const ollamaMessage = parsed.message;
+            const choiceMessage = parsed.choices?.[0]?.message;
+            const chunkObj = delta || ollamaMessage || choiceMessage;
+
+            if (chunkObj?.x_choices) {
+              accumulatedChoices = chunkObj.x_choices;
+              onChunk({ type: 'choices', choices: chunkObj.x_choices });
+            } else if (chunkObj?.choices && typeof chunkObj.choices === 'object' && Array.isArray(chunkObj.choices.options)) {
+              accumulatedChoices = chunkObj.choices;
+              onChunk({ type: 'choices', choices: chunkObj.choices });
+            }
+
+            // 1. Check x_progress structured step/summary event
+            const progressPayload = chunkObj?.x_progress || parsed.x_progress;
+            if (progressPayload) {
+              const xp = progressPayload;
+              if (xp.type === 'step' && xp.step) {
+                const stepItem = xp.step;
+                const existingIdx = accumulatedSteps.findIndex((s) => s.id === stepItem.id);
+                if (existingIdx >= 0) {
+                  accumulatedSteps[existingIdx] = { ...accumulatedSteps[existingIdx], ...stepItem };
+                } else {
+                  accumulatedSteps.push(stepItem);
+                }
+                onChunk({ type: 'progress', step: stepItem });
+              } else if (xp.type === 'summary') {
+                accumulatedSummary = xp;
+                if (Array.isArray(xp.steps)) {
+                  for (const s of xp.steps) {
+                    const idx = accumulatedSteps.findIndex((item) => item.id === s.id);
+                    if (idx >= 0) accumulatedSteps[idx] = { ...accumulatedSteps[idx], ...s };
+                    else accumulatedSteps.push(s);
+                  }
+                }
+                onChunk({ type: 'progress', summary: xp });
+              }
+            }
+
+            // 2. Check reasoning / reasoning_content / thinking (Ollama native message.thinking, delta.thinking, DeepSeek R1, Qwen reasoning)
+            const reasoningText =
+              chunkObj?.reasoning ??
+              chunkObj?.reasoning_content ??
+              chunkObj?.thinking ??
+              parsed.reasoning ??
+              parsed.reasoning_content ??
+              parsed.thinking ??
+              '';
+
+            if (typeof reasoningText === 'string' && reasoningText.length > 0 && allowThinking) {
+              accumulatedThinking += reasoningText;
+              onChunk({ type: 'thinking', text: reasoningText });
+            }
+
+            // 3. Check regular content (OpenAI delta.content, Ollama message.content or response)
+            const contentChunk =
+              typeof chunkObj?.content === 'string'
+                ? chunkObj.content
+                : typeof parsed.response === 'string'
+                ? parsed.response
+                : '';
+
+            if (contentChunk.length > 0) {
+              emitContentWithThinkTags(contentChunk);
+            }
+          } catch {
+            // Ignore partial or malformed JSON lines
+          }
+        };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -364,111 +548,44 @@ export async function generateAIChatResponse(
           buffer = lines.pop() || '';
 
           for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith(':')) continue;
-            if (trimmed === 'data: [DONE]') continue;
-
-            if (trimmed.startsWith('data: ')) {
-              try {
-                const parsed = JSON.parse(trimmed.substring(6));
-
-                // A. Check if the parsed SSE chunk itself is a choices event (e.g. {"v": 1, "type": "choices", "options": [...]})
-                if (
-                  parsed.type === 'choices' ||
-                  parsed.type === 'choices_prompt' ||
-                  (parsed.options && Array.isArray(parsed.options) && parsed.prompt)
-                ) {
-                  accumulatedChoices = parsed;
-                  onChunk({ type: 'choices', choices: parsed });
-                  continue;
-                }
-
-                // B. Check top-level x_choices property (e.g. {"x_choices": {...}})
-                if (parsed.x_choices) {
-                  accumulatedChoices = parsed.x_choices;
-                  onChunk({ type: 'choices', choices: parsed.x_choices });
-                  continue;
-                }
-
-                // C. Check delta object in OpenAI-compatible SSE chunks
-                const delta = parsed.choices?.[0]?.delta || parsed.delta;
-
-                if (delta?.x_choices) {
-                  accumulatedChoices = delta.x_choices;
-                  onChunk({ type: 'choices', choices: delta.x_choices });
-                } else if (delta?.choices && typeof delta.choices === 'object' && Array.isArray(delta.choices.options)) {
-                  accumulatedChoices = delta.choices;
-                  onChunk({ type: 'choices', choices: delta.choices });
-                }
-
-                if (!delta) continue;
-
-                // 1. Check x_progress structured step/summary event
-                if (delta.x_progress) {
-                  const xp = delta.x_progress;
-                  if (xp.type === 'step' && xp.step) {
-                    const stepItem = xp.step;
-                    const existingIdx = accumulatedSteps.findIndex((s) => s.id === stepItem.id);
-                    if (existingIdx >= 0) {
-                      accumulatedSteps[existingIdx] = { ...accumulatedSteps[existingIdx], ...stepItem };
-                    } else {
-                      accumulatedSteps.push(stepItem);
-                    }
-                    onChunk({ type: 'progress', step: stepItem });
-                  } else if (xp.type === 'summary') {
-                    accumulatedSummary = xp;
-                    if (Array.isArray(xp.steps)) {
-                      for (const s of xp.steps) {
-                        const idx = accumulatedSteps.findIndex((item) => item.id === s.id);
-                        if (idx >= 0) accumulatedSteps[idx] = { ...accumulatedSteps[idx], ...s };
-                        else accumulatedSteps.push(s);
-                      }
-                    }
-                    onChunk({ type: 'progress', summary: xp });
-                  }
-                }
-
-                // 2. Check reasoning / reasoning_content (Ollama, DeepSeek R1, Qwen reasoning, etc.)
-                const reasoningText = delta.reasoning || delta.reasoning_content;
-                if (reasoningText && allowThinking) {
-                  accumulatedThinking += reasoningText;
-                  onChunk({ type: 'thinking', text: reasoningText });
-                }
-
-                // 3. Check regular content
-                if (delta.content) {
-                  const contentChunk = delta.content;
-
-                  if (allowThinking && (contentChunk.includes('<think>') || inThinkingTag)) {
-                    if (contentChunk.includes('<think>')) inThinkingTag = true;
-                    if (contentChunk.includes('</think>')) inThinkingTag = false;
-
-                    const cleaned = contentChunk.replace(/<\/?think>/g, '');
-                    if (cleaned) {
-                      if (inThinkingTag) {
-                        accumulatedThinking += cleaned;
-                        onChunk({ type: 'thinking', text: cleaned });
-                      } else {
-                        accumulatedContent += cleaned;
-                        onChunk({ type: 'content', text: cleaned });
-                      }
-                    }
-                  } else {
-                    accumulatedContent += contentChunk;
-                    onChunk({ type: 'content', text: contentChunk });
-                  }
-                }
-              } catch (parseErr) {
-                // Ignore partial JSON parse chunks
-              }
-            }
+            processStreamLine(line);
           }
+        }
+
+        // Flush any remaining buffered line and tagBuffer
+        if (buffer.trim()) {
+          processStreamLine(buffer);
+        }
+        if (tagBuffer.length > 0) {
+          if (inThinkingTag) {
+            if (allowThinking) {
+              accumulatedThinking += tagBuffer;
+              onChunk({ type: 'thinking', text: tagBuffer });
+            }
+          } else {
+            accumulatedContent += tagBuffer;
+            onChunk({ type: 'content', text: tagBuffer });
+          }
+          tagBuffer = '';
         }
       } else {
         const data = await response.json();
-        const messageObj = data.choices?.[0]?.message;
-        const rawContent = messageObj?.content || 'Không có phản hồi từ dịch vụ AI.';
-        const reasoningContent = messageObj?.reasoning || messageObj?.reasoning_content || '';
+        const messageObj = data.choices?.[0]?.message || data.message;
+        const rawContent = messageObj?.content ?? data.response ?? 'Không có phản hồi từ dịch vụ AI.';
+        const reasoningContent =
+          messageObj?.reasoning ||
+          messageObj?.reasoning_content ||
+          messageObj?.thinking ||
+          data.reasoning ||
+          data.reasoning_content ||
+          data.thinking ||
+          '';
+
+        if (typeof data.usage?.total_tokens === 'number') {
+          reportedTotalTokens = data.usage.total_tokens;
+        } else if (typeof data.eval_count === 'number' || typeof data.prompt_eval_count === 'number') {
+          reportedTotalTokens = (data.prompt_eval_count || 0) + (data.eval_count || 0);
+        }
 
         const extracted = extractThinkingFromContent(rawContent);
         accumulatedContent = extracted.cleanContent;
@@ -490,7 +607,10 @@ export async function generateAIChatResponse(
 
       clearTimeout(timer);
       const latencyMs = Date.now() - startTime;
-      const totalTokens = Math.ceil((JSON.stringify(fullMessages).length + accumulatedContent.length + accumulatedThinking.length) / 4);
+      const totalTokens =
+        reportedTotalTokens > 0
+          ? reportedTotalTokens
+          : Math.ceil((JSON.stringify(fullMessages).length + accumulatedContent.length + accumulatedThinking.length) / 4);
       const tokensPerSecond = latencyMs > 0 ? Number(((totalTokens / (latencyMs / 1000))).toFixed(1)) : 0;
 
       return {

@@ -762,12 +762,19 @@ export const ChatWindow: React.FC<Props> = ({
 // Collapsible Thinking / Reasoning Process Box
 const ThinkingBox = ({ thinking, isLive = false }: { thinking: string; isLive?: boolean }) => {
   const [isOpen, setIsOpen] = useState(isLive);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (isLive) {
-      setIsOpen(true);
-    }
+    setIsOpen(isLive);
   }, [isLive]);
+
+  useEffect(() => {
+    if (isLive && isOpen && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [thinking, isLive, isOpen]);
+
+  const cleanThinking = thinking.replace(/^\s*\n+/, '');
 
   return (
     <div className="mb-3 rounded-xl border border-indigo-200/70 dark:border-indigo-900/40 bg-indigo-50/50 dark:bg-slate-950/60 overflow-hidden text-xs transition-all">
@@ -787,8 +794,11 @@ const ThinkingBox = ({ thinking, isLive = false }: { thinking: string; isLive?: 
       </button>
 
       {isOpen && (
-        <div className="p-3 pt-1 border-t border-indigo-100 dark:border-indigo-950/60 font-mono text-[11px] leading-relaxed text-slate-600 dark:text-slate-400 whitespace-pre-wrap max-h-60 overflow-y-auto bg-white/40 dark:bg-slate-950/30">
-          {thinking}
+        <div
+          ref={contentRef}
+          className="p-3 pt-2 border-t border-indigo-100 dark:border-indigo-950/60 font-mono text-[11px] leading-relaxed text-slate-600 dark:text-slate-400 whitespace-pre-wrap max-h-60 overflow-y-auto bg-white/40 dark:bg-slate-950/30"
+        >
+          {cleanThinking}
         </div>
       )}
     </div>
