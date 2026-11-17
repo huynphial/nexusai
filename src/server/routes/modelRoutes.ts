@@ -34,16 +34,42 @@ router.post('/', async (req: CustomRequest, res: Response) => {
   try {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
-    const { name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active } = req.body;
+    const {
+      name,
+      provider,
+      model_identifier,
+      api_url,
+      api_token,
+      system_prompt,
+      timeout_seconds,
+      enable_stream,
+      enable_thinking,
+      temperature,
+      top_p,
+      max_tokens,
+      presence_penalty,
+      frequency_penalty,
+      is_active
+    } = req.body;
 
     if (!name || !provider || !model_identifier) {
       return res.status(400).json({ error: 'Vui lòng cung cấp Tên hiển thị, Provider và Mã định danh Model.' });
     }
 
+    const parsedTemp = temperature !== undefined && temperature !== '' ? Number(temperature) : 0.7;
+    const parsedTopP = top_p !== undefined && top_p !== '' ? Number(top_p) : 0.95;
+    const parsedMaxTokens = max_tokens !== undefined && max_tokens !== '' ? Math.max(0, Math.round(Number(max_tokens))) : 0;
+    const parsedPresence = presence_penalty !== undefined && presence_penalty !== '' ? Number(presence_penalty) : 0;
+    const parsedFrequency = frequency_penalty !== undefined && frequency_penalty !== '' ? Number(frequency_penalty) : 0;
+
     const result = await run(
       `
-      INSERT INTO ai_models (name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO ai_models (
+        name, provider, model_identifier, api_url, api_token, system_prompt,
+        timeout_seconds, enable_stream, enable_thinking,
+        temperature, top_p, max_tokens, presence_penalty, frequency_penalty, is_active
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         name.trim(),
@@ -55,6 +81,11 @@ router.post('/', async (req: CustomRequest, res: Response) => {
         timeout_seconds ? Number(timeout_seconds) : 60,
         enable_stream !== undefined ? (enable_stream ? 1 : 0) : 1,
         enable_thinking !== undefined ? (enable_thinking ? 1 : 0) : 1,
+        Number.isFinite(parsedTemp) ? parsedTemp : 0.7,
+        Number.isFinite(parsedTopP) ? parsedTopP : 0.95,
+        Number.isFinite(parsedMaxTokens) ? parsedMaxTokens : 0,
+        Number.isFinite(parsedPresence) ? parsedPresence : 0,
+        Number.isFinite(parsedFrequency) ? parsedFrequency : 0,
         is_active !== undefined ? (is_active ? 1 : 0) : 1
       ]
     );
@@ -63,7 +94,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
       adminId,
       adminEmail,
       'ADMIN_CREATE_MODEL',
-      `Khai báo mô hình AI mới "${name}" (${provider}:${model_identifier}) [Timeout: ${timeout_seconds || 60}s]`,
+      `Khai báo mô hình AI mới "${name}" (${provider}:${model_identifier}) [Timeout: ${timeout_seconds || 60}s, Temp: ${parsedTemp}]`,
       req.ip
     );
 
@@ -79,7 +110,23 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
     const modelId = parseInt(req.params.id, 10);
-    const { name, provider, model_identifier, api_url, api_token, system_prompt, timeout_seconds, enable_stream, enable_thinking, is_active } = req.body;
+    const {
+      name,
+      provider,
+      model_identifier,
+      api_url,
+      api_token,
+      system_prompt,
+      timeout_seconds,
+      enable_stream,
+      enable_thinking,
+      temperature,
+      top_p,
+      max_tokens,
+      presence_penalty,
+      frequency_penalty,
+      is_active
+    } = req.body;
 
     const existing = await getOne(`SELECT * FROM ai_models WHERE id = ?`, [modelId]);
     if (!existing) {
@@ -91,11 +138,19 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       updatedToken = api_token.trim();
     }
 
+    const nextTemp = temperature !== undefined && temperature !== '' ? Number(temperature) : (existing.temperature ?? 0.7);
+    const nextTopP = top_p !== undefined && top_p !== '' ? Number(top_p) : (existing.top_p ?? 0.95);
+    const nextMaxTokens = max_tokens !== undefined && max_tokens !== '' ? Math.max(0, Math.round(Number(max_tokens))) : (existing.max_tokens ?? 0);
+    const nextPresence = presence_penalty !== undefined && presence_penalty !== '' ? Number(presence_penalty) : (existing.presence_penalty ?? 0);
+    const nextFrequency = frequency_penalty !== undefined && frequency_penalty !== '' ? Number(frequency_penalty) : (existing.frequency_penalty ?? 0);
+
     await run(
       `
       UPDATE ai_models
       SET name = ?, provider = ?, model_identifier = ?, api_url = ?, api_token = ?, system_prompt = ?,
-          timeout_seconds = ?, enable_stream = ?, enable_thinking = ?, is_active = ?
+          timeout_seconds = ?, enable_stream = ?, enable_thinking = ?,
+          temperature = ?, top_p = ?, max_tokens = ?, presence_penalty = ?, frequency_penalty = ?,
+          is_active = ?
       WHERE id = ?
       `,
       [
@@ -108,6 +163,11 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
         timeout_seconds !== undefined ? Number(timeout_seconds) : (existing.timeout_seconds || 60),
         enable_stream !== undefined ? (enable_stream ? 1 : 0) : (existing.enable_stream ?? 1),
         enable_thinking !== undefined ? (enable_thinking ? 1 : 0) : (existing.enable_thinking ?? 1),
+        Number.isFinite(nextTemp) ? nextTemp : 0.7,
+        Number.isFinite(nextTopP) ? nextTopP : 0.95,
+        Number.isFinite(nextMaxTokens) ? nextMaxTokens : 0,
+        Number.isFinite(nextPresence) ? nextPresence : 0,
+        Number.isFinite(nextFrequency) ? nextFrequency : 0,
         is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active,
         modelId
       ]

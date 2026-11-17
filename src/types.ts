@@ -60,6 +60,11 @@ export interface AIModel {
   timeout_seconds?: number;
   enable_stream?: number | boolean;
   enable_thinking?: number | boolean;
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
   is_active: number | boolean;
   created_at?: string;
 }

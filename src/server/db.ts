@@ -147,6 +147,11 @@ export async function initDatabase() {
         timeout_seconds INTEGER DEFAULT 60,
         enable_stream INTEGER DEFAULT 1,
         enable_thinking INTEGER DEFAULT 1,
+        temperature REAL DEFAULT 0.7,
+        top_p REAL DEFAULT 0.95,
+        max_tokens INTEGER DEFAULT 0,
+        presence_penalty REAL DEFAULT 0,
+        frequency_penalty REAL DEFAULT 0,
         is_active INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -237,6 +242,21 @@ export async function initDatabase() {
       }
       if (!modelColNames.includes('enable_thinking')) {
         await run(`ALTER TABLE ai_models ADD COLUMN enable_thinking INTEGER DEFAULT 1`);
+      }
+      if (!modelColNames.includes('temperature')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN temperature REAL DEFAULT 0.7`);
+      }
+      if (!modelColNames.includes('top_p')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN top_p REAL DEFAULT 0.95`);
+      }
+      if (!modelColNames.includes('max_tokens')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN max_tokens INTEGER DEFAULT 0`);
+      }
+      if (!modelColNames.includes('presence_penalty')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN presence_penalty REAL DEFAULT 0`);
+      }
+      if (!modelColNames.includes('frequency_penalty')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN frequency_penalty REAL DEFAULT 0`);
       }
 
       const msgCols = await query(`PRAGMA table_info(chat_messages)`);

@@ -17,6 +17,11 @@ export interface AIModelConfig {
   timeout_seconds?: number;
   enable_stream?: number | boolean;
   enable_thinking?: number | boolean;
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
 }
 
 export interface StreamChunk {
@@ -112,14 +117,25 @@ export async function generateAIChatResponse(
       let accumulatedText = '';
       let accumulatedThinking = '';
 
+      const modelTemp = typeof modelConfig.temperature === 'number' ? modelConfig.temperature : 0.7;
+      const modelTopP = typeof modelConfig.top_p === 'number' ? modelConfig.top_p : 0.95;
+      const modelMaxTokens = typeof modelConfig.max_tokens === 'number' && modelConfig.max_tokens > 0 ? modelConfig.max_tokens : undefined;
+
+      const geminiConfig: any = {
+        systemInstruction: systemPrompt,
+        temperature: modelTemp,
+        topP: modelTopP,
+      };
+      if (modelMaxTokens) {
+        geminiConfig.maxOutputTokens = modelMaxTokens;
+      }
+
       if (isStreamWanted) {
         // Streaming via Gemini SDK
         const streamResult = await ai.models.generateContentStream({
           model: modelName,
           contents: formattedContents.length > 0 ? (formattedContents as any) : 'Xin chào',
-          config: {
-            systemInstruction: systemPrompt,
-          },
+          config: geminiConfig,
         });
 
         let inThinkingMode = false;
@@ -152,9 +168,7 @@ export async function generateAIChatResponse(
         const res = await ai.models.generateContent({
           model: modelName,
           contents: formattedContents.length > 0 ? (formattedContents as any) : 'Xin chào',
-          config: {
-            systemInstruction: systemPrompt,
-          },
+          config: geminiConfig,
         });
         accumulatedText = res.text || 'Không có phản hồi từ mô hình.';
       }
@@ -266,6 +280,12 @@ export async function generateAIChatResponse(
       }
       const isOllamaNative = /\/api\/(chat|generate)$/i.test(endpointUrl);
 
+      const modelTemp = typeof modelConfig.temperature === 'number' ? modelConfig.temperature : 0.7;
+      const modelTopP = typeof modelConfig.top_p === 'number' ? modelConfig.top_p : 0.95;
+      const modelMaxTokens = typeof modelConfig.max_tokens === 'number' && modelConfig.max_tokens > 0 ? modelConfig.max_tokens : 0;
+      const modelPresence = typeof modelConfig.presence_penalty === 'number' ? modelConfig.presence_penalty : 0;
+      const modelFrequency = typeof modelConfig.frequency_penalty === 'number' ? modelConfig.frequency_penalty : 0;
+
       const requestPayload: any = {
         model: modelId,
         messages: fullMessages,
@@ -273,10 +293,21 @@ export async function generateAIChatResponse(
       };
 
       if (isOllamaNative) {
-        requestPayload.options = { temperature: 0.7 };
+        const ollamaOpts: any = {
+          temperature: modelTemp,
+          top_p: modelTopP,
+        };
+        if (modelMaxTokens > 0) ollamaOpts.num_predict = modelMaxTokens;
+        if (modelPresence !== 0) ollamaOpts.presence_penalty = modelPresence;
+        if (modelFrequency !== 0) ollamaOpts.frequency_penalty = modelFrequency;
+        requestPayload.options = ollamaOpts;
         requestPayload.think = allowThinking;
       } else {
-        requestPayload.temperature = 0.7;
+        requestPayload.temperature = modelTemp;
+        requestPayload.top_p = modelTopP;
+        if (modelMaxTokens > 0) requestPayload.max_tokens = modelMaxTokens;
+        if (modelPresence !== 0) requestPayload.presence_penalty = modelPresence;
+        if (modelFrequency !== 0) requestPayload.frequency_penalty = modelFrequency;
         if (allowThinking) {
           requestPayload.think = true;
         } else if (!baseUrl.includes('api.openai.com')) {

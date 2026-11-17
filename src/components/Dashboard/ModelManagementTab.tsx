@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AIModel } from '../../types';
-import { Plus, Edit2, Trash2, Cpu, Key, Globe, Terminal, CheckCircle, XCircle, Clock, Radio, Brain } from 'lucide-react';
+import { Plus, Edit2, Trash2, Cpu, Clock, Radio, Brain, CheckCircle, XCircle, Sliders } from 'lucide-react';
 
 interface Props {
   models: AIModel[];
@@ -27,6 +27,11 @@ export const ModelManagementTab: React.FC<Props> = ({
   const [timeoutSeconds, setTimeoutSeconds] = useState<number>(60);
   const [enableStream, setEnableStream] = useState<boolean>(true);
   const [enableThinking, setEnableThinking] = useState<boolean>(true);
+  const [temperature, setTemperature] = useState<number>(0.7);
+  const [topP, setTopP] = useState<number>(0.95);
+  const [maxTokens, setMaxTokens] = useState<number>(0);
+  const [presencePenalty, setPresencePenalty] = useState<number>(0);
+  const [frequencyPenalty, setFrequencyPenalty] = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(true);
   const [loading, setLoading] = useState(false);
 
@@ -41,6 +46,11 @@ export const ModelManagementTab: React.FC<Props> = ({
     setTimeoutSeconds(60);
     setEnableStream(true);
     setEnableThinking(true);
+    setTemperature(0.7);
+    setTopP(0.95);
+    setMaxTokens(0);
+    setPresencePenalty(0);
+    setFrequencyPenalty(0);
     setIsActive(true);
     setIsModalOpen(true);
   };
@@ -56,6 +66,11 @@ export const ModelManagementTab: React.FC<Props> = ({
     setTimeoutSeconds(m.timeout_seconds || 60);
     setEnableStream(m.enable_stream === 1 || m.enable_stream === true || m.enable_stream === undefined);
     setEnableThinking(m.enable_thinking === 1 || m.enable_thinking === true || m.enable_thinking === undefined);
+    setTemperature(m.temperature ?? 0.7);
+    setTopP(m.top_p ?? 0.95);
+    setMaxTokens(m.max_tokens ?? 0);
+    setPresencePenalty(m.presence_penalty ?? 0);
+    setFrequencyPenalty(m.frequency_penalty ?? 0);
     setIsActive(m.is_active === 1 || m.is_active === true);
     setIsModalOpen(true);
   };
@@ -78,6 +93,11 @@ export const ModelManagementTab: React.FC<Props> = ({
         timeout_seconds: timeoutSeconds,
         enable_stream: enableStream ? 1 : 0,
         enable_thinking: enableThinking ? 1 : 0,
+        temperature,
+        top_p: topP,
+        max_tokens: maxTokens,
+        presence_penalty: presencePenalty,
+        frequency_penalty: frequencyPenalty,
         is_active: isActive,
       };
 
@@ -171,6 +191,13 @@ export const ModelManagementTab: React.FC<Props> = ({
                             <Brain className="w-2.5 h-2.5" /> Thinking
                           </span>
                         )}
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
+                          title="Temperature / Top P / Max Tokens"
+                        >
+                          T:{m.temperature ?? 0.7} · P:{m.top_p ?? 0.95}
+                          {(m.max_tokens ?? 0) > 0 ? ` · Max:${m.max_tokens}` : ''}
+                        </span>
                       </div>
                     </td>
                     <td className="p-3">
@@ -333,6 +360,109 @@ export const ModelManagementTab: React.FC<Props> = ({
                     <span>Bật hiển thị quá trình suy luận (Thinking / Reasoning Box)</span>
                   </label>
                 </div>
+              </div>
+
+              {/* Basic LLM Generation Parameters */}
+              <div className="p-3 bg-slate-50 dark:bg-slate-950/60 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Sliders className="w-3.5 h-3.5 text-indigo-500" />
+                    <span>Thông số sinh văn bản cơ bản (Model Parameters)</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTemperature(0.7);
+                      setTopP(0.95);
+                      setMaxTokens(0);
+                      setPresencePenalty(0);
+                      setFrequencyPenalty(0);
+                    }}
+                    className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline font-medium cursor-pointer"
+                  >
+                    Đặt lại mặc định
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-400 mb-1" title="Độ sáng tạo (0.0 = chính xác, 1.0+ = sáng tạo)">
+                      Temperature <span className="text-slate-400 font-mono">(0–2)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step={0.1}
+                      min={0}
+                      max={2}
+                      value={temperature}
+                      onChange={(e) => setTemperature(Number(e.target.value))}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-400 mb-1" title="Nucleus sampling: lọc top xác suất tích lũy">
+                      Top P <span className="text-slate-400 font-mono">(0–1)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step={0.05}
+                      min={0}
+                      max={1}
+                      value={topP}
+                      onChange={(e) => setTopP(Number(e.target.value))}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-400 mb-1" title="Giới hạn token đầu ra (0 = theo mặc định model)">
+                      Max Tokens <span className="text-slate-400 font-mono">(0=MĐ)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step={256}
+                      min={0}
+                      max={128000}
+                      value={maxTokens}
+                      onChange={(e) => setMaxTokens(Number(e.target.value))}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-400 mb-1" title="Phạt lặp chủ đề (-2 đến 2)">
+                      Presence Penalty
+                    </label>
+                    <input
+                      type="number"
+                      step={0.1}
+                      min={-2}
+                      max={2}
+                      value={presencePenalty}
+                      onChange={(e) => setPresencePenalty(Number(e.target.value))}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-600 dark:text-slate-400 mb-1" title="Phạt lặp từ ngữ (-2 đến 2)">
+                      Frequency Penalty
+                    </label>
+                    <input
+                      type="number"
+                      step={0.1}
+                      min={-2}
+                      max={2}
+                      value={frequencyPenalty}
+                      onChange={(e) => setFrequencyPenalty(Number(e.target.value))}
+                      className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs"
+                    />
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                  Gợi ý: Đặt <b>Temperature = 0.0 – 0.3</b> cho model RAG/SQL hoặc suy luận chính xác; <b>0.7</b> cho hội thoại tự nhiên. <b>Max Tokens = 0</b> để dùng giới hạn mặc định của model.
+                </p>
               </div>
 
               {provider !== 'gemini' && (

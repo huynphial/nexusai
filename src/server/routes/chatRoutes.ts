@@ -21,7 +21,9 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
     const models = await query(
       `
       SELECT m.id, m.name, m.provider, m.model_identifier, m.system_prompt,
-             m.timeout_seconds, m.enable_stream, m.enable_thinking, m.is_active,
+             m.timeout_seconds, m.enable_stream, m.enable_thinking,
+             m.temperature, m.top_p, m.max_tokens, m.presence_penalty, m.frequency_penalty,
+             m.is_active,
              gma.rate_limit_period, gma.rate_limit_requests, gma.max_tokens_group, gma.max_tokens_per_user
       FROM ai_models m
       JOIN group_model_access gma ON m.id = gma.model_id
@@ -43,6 +45,11 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
         timeout_seconds: m.timeout_seconds || 60,
         enable_stream: m.enable_stream ?? 1,
         enable_thinking: m.enable_thinking ?? 1,
+        temperature: m.temperature ?? 0.7,
+        top_p: m.top_p ?? 0.95,
+        max_tokens: m.max_tokens ?? 0,
+        presence_penalty: m.presence_penalty ?? 0,
+        frequency_penalty: m.frequency_penalty ?? 0,
         is_default: m.id === defaultModelId,
         quota: quotaCheck.usage,
         allowed: quotaCheck.allowed,

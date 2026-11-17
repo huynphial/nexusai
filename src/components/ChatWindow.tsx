@@ -140,10 +140,10 @@ export const ChatWindow: React.FC<Props> = ({
   };
 
   const examplePrompts = [
-    'Tóm tắt các điểm quan trọng về cách cấu hình Rate Limit cho mô hình LLM.',
-    'Viết một hàm TypeScript tính toán số lượng Token tiêu thụ theo khoảng thời gian.',
-    'Giải thích cách hoạt động của cơ chế Thinking/Reasoning trong các mô hình AI mới.',
-    'Viết một kịch bản kiểm thử API Chatbot hoàn chỉnh bằng cURL.',
+    'Giới thiêu về kịch bản kinh doanh của dịch vụ X',
+    'Doanh thu dịch vụ Y tháng trước bằng bao nhiêu',
+    'Xu hướng doanh thu 6 tháng qua của dịch vụ X như thế nào?',
+    'So sánh doanh thu tháng hiện tại của dịch vụ X và dịch vụ Y',
   ];
 
   const modelSupportsThinking = Boolean(selectedModel?.enable_thinking);
@@ -853,6 +853,15 @@ const DebugThinkingPanel = ({
             <div>
               <span className="text-slate-400">Tốc độ sinh token:</span>{' '}
               <b className="text-emerald-600 dark:text-emerald-400">{msg.tokens_per_second || 0} token/s</b>
+            </div>
+            <div className="sm:col-span-2">
+              <span className="text-slate-400">Tham số Model:</span>{' '}
+              <span className="text-slate-700 dark:text-slate-300">
+                temperature={model.temperature ?? 0.7} · top_p={model.top_p ?? 0.95}
+                {(model.max_tokens ?? 0) > 0 ? ` · max_tokens=${model.max_tokens}` : ''}
+                {(model.presence_penalty ?? 0) !== 0 ? ` · presence=${model.presence_penalty}` : ''}
+                {(model.frequency_penalty ?? 0) !== 0 ? ` · frequency=${model.frequency_penalty}` : ''}
+              </span>
             </div>
           </div>
 
