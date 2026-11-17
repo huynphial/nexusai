@@ -280,6 +280,7 @@ function MainContent() {
                 isThinking: prev?.isThinking ?? false,
                 progress_steps: currentSteps,
                 progress_summary: chunk.summary || prev?.progress_summary,
+                x_choices: prev?.x_choices,
               };
             });
           } else if (chunk.type === 'thinking') {

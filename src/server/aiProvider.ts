@@ -508,14 +508,14 @@ export async function generateAIChatResponse(
               }
             }
 
-            // 2. Check reasoning / reasoning_content / thinking (Ollama native message.thinking, delta.thinking, DeepSeek R1, Qwen reasoning)
+            // 2. Check thinking / reasoning_content / reasoning (prefer thinking/reasoning_content to preserve leading spaces)
             const reasoningText =
-              chunkObj?.reasoning ??
-              chunkObj?.reasoning_content ??
               chunkObj?.thinking ??
-              parsed.reasoning ??
-              parsed.reasoning_content ??
+              chunkObj?.reasoning_content ??
+              chunkObj?.reasoning ??
               parsed.thinking ??
+              parsed.reasoning_content ??
+              parsed.reasoning ??
               '';
 
             if (typeof reasoningText === 'string' && reasoningText.length > 0 && allowThinking) {

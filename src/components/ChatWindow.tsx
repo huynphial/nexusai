@@ -499,8 +499,8 @@ export const ChatWindow: React.FC<Props> = ({
                         <ProgressTimeline steps={m.progress_steps} summary={m.progress_summary} isLive={false} />
                       )}
 
-                      {/* Thinking / Reasoning Box (Only if model produced thinking and NOT a step progress RAG model) */}
-                      {m.thinking_content && (!m.progress_steps || m.progress_steps.length === 0) && (
+                      {/* Thinking / Reasoning Box (Show whenever model produced thinking content) */}
+                      {m.thinking_content && (
                         <ThinkingBox thinking={m.thinking_content} isLive={false} />
                       )}
 
@@ -608,17 +608,18 @@ export const ChatWindow: React.FC<Props> = ({
                 />
               )}
 
-              {/* Live Thinking Process (Only show if model is NOT step_progress / has no progress steps) */}
-              {thinkingEnabled &&
-                modelSupportsThinking &&
-                selectedModel?.provider !== 'step_progress' &&
-                (!streamingData.progress_steps || streamingData.progress_steps.length === 0) &&
-                (streamingData.thinking || streamingData.isThinking) && (
-                  <ThinkingBox
-                    thinking={streamingData.thinking || 'Đang phân tích câu hỏi và chuẩn bị các bước suy luận...'}
-                    isLive={streamingData.isThinking}
-                  />
-                )}
+              {/* Live Thinking Process (Show immediately when real thinking tokens arrive, even for RAG/step_progress models) */}
+              {((streamingData.thinking && streamingData.thinking.length > 0) ||
+                (thinkingEnabled &&
+                  modelSupportsThinking &&
+                  selectedModel?.provider !== 'step_progress' &&
+                  (!streamingData.progress_steps || streamingData.progress_steps.length === 0) &&
+                  streamingData.isThinking)) && (
+                <ThinkingBox
+                  thinking={streamingData.thinking || 'Đang phân tích câu hỏi và chuẩn bị các bước suy luận...'}
+                  isLive={Boolean(streamingData.isThinking)}
+                />
+              )}
 
               {/* Debug Thinking Panel (If enabled for user group / admin) */}
               {(user?.enable_debug_thinking || user?.role === 'admin') && selectedModel && (
