@@ -275,7 +275,6 @@ export async function generateAIChatResponse(
           const stepStart = Date.now() - startTime;
           const toolName = binding?.originalName || fc.name;
           const serverName = binding?.serverName || 'MCP';
-          const toolDesc = binding?.rawDescription || '';
 
           const runningStep = {
             id: stepId,
@@ -285,12 +284,10 @@ export async function generateAIChatResponse(
             start_ms: stepStart,
             end_ms: null,
             duration_ms: null,
-            detail: toolDesc || undefined,
             meta: {
               kind: 'mcp_tool',
               tool_name: toolName,
               server_name: serverName,
-              tool_description: toolDesc,
               transport: binding?.transport || '',
               arg_keys: Object.keys(fc.args || {}),
             },
@@ -316,12 +313,10 @@ export async function generateAIChatResponse(
             status: toolResult.isError ? 'error' : 'done',
             end_ms: Date.now() - startTime,
             duration_ms: toolMs,
-            detail: toolDesc || undefined,
             meta: {
               kind: 'mcp_tool',
               tool_name: toolName,
               server_name: serverName,
-              tool_description: toolDesc,
               transport: toolResult.transport || binding?.transport || '',
               status_code: toolResult.statusCode,
               arg_keys: Object.keys(fc.args || {}),
@@ -972,7 +967,6 @@ export async function generateAIChatResponse(
           const stepId = `mcp_${turn}_${i}_${Date.now()}`;
           const toolName = binding?.originalName || tc.name;
           const serverName = binding?.serverName || 'MCP';
-          const toolDesc = binding?.rawDescription || '';
 
           const runningStep = {
             id: stepId,
@@ -982,12 +976,10 @@ export async function generateAIChatResponse(
             start_ms: Date.now() - startTime,
             end_ms: null,
             duration_ms: null,
-            detail: toolDesc || undefined,
             meta: {
               kind: 'mcp_tool',
               tool_name: toolName,
               server_name: serverName,
-              tool_description: toolDesc,
               transport: binding?.transport || '',
               arg_keys: Object.keys(tc.parsedArgs || {}),
             },
@@ -1013,12 +1005,10 @@ export async function generateAIChatResponse(
             status: toolResult.isError ? 'error' : 'done',
             end_ms: Date.now() - startTime,
             duration_ms: toolMs,
-            detail: toolDesc || undefined,
             meta: {
               kind: 'mcp_tool',
               tool_name: toolName,
               server_name: serverName,
-              tool_description: toolDesc,
               transport: toolResult.transport || binding?.transport || '',
               status_code: toolResult.statusCode,
               arg_keys: Object.keys(tc.parsedArgs || {}),

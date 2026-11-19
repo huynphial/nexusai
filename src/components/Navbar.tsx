@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
+import { APP_CONFIG } from '../config/appConfig';
 import { Bot, LayoutDashboard, LogOut, Moon, Sun, User as UserIcon, Shield, Sparkles } from 'lucide-react';
 
 interface Props {
@@ -34,7 +35,7 @@ export const Navbar: React.FC<Props> = ({
           <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 via-indigo-500 to-purple-500 flex items-center justify-center text-white shadow-md shadow-indigo-500/20">
             <Bot className="w-5 h-5" />
           </div>
-          <span>Local AI</span>
+          <span>{APP_CONFIG.appName}</span>
         </a>
       </div>
 

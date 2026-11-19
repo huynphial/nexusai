@@ -3,6 +3,7 @@ import { ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from '../t
 import { MarkdownViewer } from './MarkdownViewer';
 import { ChoicePromptBox } from './ChoicePromptBox';
 import { useAuth } from '../context/AuthContext';
+import { APP_CONFIG } from '../config/appConfig';
 import {
   Send,
   Bot,
@@ -396,10 +397,10 @@ export const ChatWindow: React.FC<Props> = ({
             </div>
 
             <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-2">
-              Chào mừng bạn đến với Local AI
+              {APP_CONFIG.appGreeting}
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mb-6 leading-relaxed">
-              Trợ lý trí tuệ nhân tạo hỗ trợ streaming thời gian thực, hiển thị quá trình suy luận (Thinking) và đo lường hiệu năng tốc độ xử lý token chi tiết.
+              {APP_CONFIG.appDescription}
             </p>
 
             {/* Example Prompt Chips */}
@@ -1101,7 +1102,6 @@ const ProgressTimeline: React.FC<{
             const isHttpOk = statusCode !== undefined && statusCode >= 200 && statusCode < 300;
             const mcpToolName = step.meta?.tool_name || step.title?.replace(/^Gọi công cụ MCP:\s*/i, '') || step.id;
             const mcpServerName = step.meta?.server_name;
-            const mcpDesc = step.meta?.tool_description || (!isError && step.detail && !step.detail.startsWith('Tham số:') ? step.detail : '');
             const mcpArgKeys = Array.isArray(step.meta?.arg_keys) ? step.meta.arg_keys : [];
 
             return (
@@ -1197,15 +1197,9 @@ const ProgressTimeline: React.FC<{
                     </div>
                   </div>
 
-                  {/* Useful MCP Tool metadata (hides raw MCP server response body) */}
+                  {/* Useful MCP Tool metadata (hides raw MCP server response body & tool description) */}
                   {isMcpTool ? (
                     <div className="mt-1.5 space-y-1 text-[11px] text-slate-600 dark:text-slate-400">
-                      {mcpDesc && (
-                        <p className="leading-relaxed">
-                          <span className="font-semibold text-slate-700 dark:text-slate-300">Tác dụng:</span>{' '}
-                          {mcpDesc}
-                        </p>
-                      )}
                       <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
                         {step.meta?.transport && (
                           <span className="font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">

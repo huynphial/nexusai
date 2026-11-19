@@ -50,7 +50,8 @@ app.use('/api/mcp', mcpRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Local AI Server', timestamp: new Date().toISOString() });
+  const appName = process.env.VITE_APP_NAME?.trim() || 'Local AI';
+  res.json({ status: 'ok', service: `${appName} Server`, timestamp: new Date().toISOString() });
 });
 
 // Configure Vite integration for Development vs Production
@@ -77,9 +78,10 @@ async function startServer() {
       }
       try {
         const indexHtmlPath = path.resolve(__dirname, 'index.html');
+        const appTitle = process.env.VITE_APP_TITLE?.trim() || 'Local AI';
         let htmlStr = fs.existsSync(indexHtmlPath)
           ? fs.readFileSync(indexHtmlPath, 'utf-8')
-          : `<!doctype html><html><head><title>NexusAI</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>`;
+          : `<!doctype html><html><head><title>${appTitle}</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>`;
         let template = await vite.transformIndexHtml(url, htmlStr);
         res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
       } catch (e: any) {
@@ -104,7 +106,8 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Server] NexusAI LLM Chat App running on http://0.0.0.0:${PORT}`);
+    const appName = process.env.VITE_APP_NAME?.trim() || 'Local AI';
+    console.log(`[Server] ${appName} LLM Chat App running on http://0.0.0.0:${PORT}`);
   });
 }
 

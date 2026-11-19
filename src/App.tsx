@@ -7,6 +7,7 @@ import { LoginModal } from './components/LoginModal';
 import { DashboardMain } from './components/Dashboard/DashboardMain';
 import { ChatSession, ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from './types';
 import { api } from './api';
+import { APP_CONFIG } from './config/appConfig';
 import { Menu } from 'lucide-react';
 
 function MainContent() {
@@ -30,6 +31,11 @@ function MainContent() {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
+
+  // Sync document title from env config
+  useEffect(() => {
+    document.title = APP_CONFIG.appTitle;
+  }, []);
 
   // Sync dark mode class on <html> element
   useEffect(() => {

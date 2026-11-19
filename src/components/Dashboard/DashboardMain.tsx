@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, UserGroup, AIModel, DashboardStats, McpServer } from '../../types';
 import { api } from '../../api';
+import { APP_CONFIG } from '../../config/appConfig';
 import { OverviewTab } from './OverviewTab';
 import { UserManagementTab } from './UserManagementTab';
 import { GroupManagementTab } from './GroupManagementTab';
@@ -130,7 +131,7 @@ export const DashboardMain: React.FC = () => {
         <div>
           <h1 className="text-lg font-extrabold text-slate-900 dark:text-slate-100 flex items-center gap-2">
             <LayoutDashboard className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-            <span>Dashboard Quản Trị Hệ Thống Local AI</span>
+            <span>Dashboard Quản Trị Hệ Thống {APP_CONFIG.appName}</span>
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
             Quản lý tập trung Mô hình Chat LLM, Khai báo ChatGPT Token, Phân quyền Nhóm, Rate Limit & Audit Logs.

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AIModel, McpServer } from '../../types';
+import { APP_CONFIG } from '../../config/appConfig';
 import { Plus, Edit2, Trash2, Cpu, Clock, Radio, Brain, CheckCircle, XCircle, Sliders, Plug } from 'lucide-react';
 
 interface Props {
@@ -46,7 +47,7 @@ export const ModelManagementTab: React.FC<Props> = ({
     setModelIdentifier('gpt-4o');
     setApiUrl('https://api.openai.com/v1');
     setApiToken('');
-    setSystemPrompt('Bạn là trợ lý trí tuệ nhân tạo Local AI, hỗ trợ người dùng chu đáo bằng Tiếng Việt.');
+    setSystemPrompt(`Bạn là trợ lý trí tuệ nhân tạo ${APP_CONFIG.appName}, hỗ trợ người dùng chu đáo bằng Tiếng Việt.`);
     setTimeoutSeconds(60);
     setEnableStream(true);
     setEnableThinking(true);
@@ -137,7 +138,7 @@ export const ModelManagementTab: React.FC<Props> = ({
         <div>
           <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
             <Cpu className="w-4 h-4 text-indigo-500" />
-            <span>Khai Báo Mô Hình, Timeout, Stream & Thinking (Local AI)</span>
+            <span>Khai Báo Mô Hình, Timeout, Stream & Thinking ({APP_CONFIG.appName})</span>
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             Cấu hình thời gian chờ tối đa (Timeout) ngăn lỗi treo API, cơ chế Stream thời gian thực và trích xuất quá trình suy luận (Thinking).
