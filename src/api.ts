@@ -1,4 +1,4 @@
-import { User, UserGroup, AIModel, ModelWithQuota, ChatSession, ChatMessage, DashboardStats, SystemEnvInfo, ProgressStep, ProgressSummary } from './types';
+import { User, UserGroup, AIModel, ModelWithQuota, ChatSession, ChatMessage, DashboardStats, SystemEnvInfo, ProgressStep, ProgressSummary, McpServer, McpToolDefinition } from './types';
 
 const API_BASE = '/api';
 
@@ -54,9 +54,28 @@ export const api = {
 
   // User Groups (Admin)
   getGroups: () => request<{ groups: UserGroup[] }>('/groups'),
-  createGroup: (groupData: { name: string; description?: string; access_rules?: any[] }) =>
+  createGroup: (groupData: {
+    name: string;
+    description?: string;
+    default_model_id?: number | null;
+    enable_debug_thinking?: number | boolean;
+    enable_mcp?: number | boolean;
+    mcp_server_ids?: number[];
+    access_rules?: any[];
+  }) =>
     request<{ groupId: number }>('/groups', { method: 'POST', body: JSON.stringify(groupData) }),
-  updateGroup: (id: number, groupData: { name?: string; description?: string; access_rules?: any[] }) =>
+  updateGroup: (
+    id: number,
+    groupData: {
+      name?: string;
+      description?: string;
+      default_model_id?: number | null;
+      enable_debug_thinking?: number | boolean;
+      enable_mcp?: number | boolean;
+      mcp_server_ids?: number[];
+      access_rules?: any[];
+    }
+  ) =>
     request<{ message: string }>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(groupData) }),
   deleteGroup: (id: number) => request<{ message: string }>(`/groups/${id}`, { method: 'DELETE' }),
 
@@ -67,6 +86,34 @@ export const api = {
   updateModel: (id: number, modelData: Partial<AIModel>) =>
     request<{ message: string }>(`/admin/models/${id}`, { method: 'PUT', body: JSON.stringify(modelData) }),
   deleteModel: (id: number) => request<{ message: string }>(`/admin/models/${id}`, { method: 'DELETE' }),
+
+  // MCP Servers (Admin)
+  getMcpServers: () => request<{ servers: McpServer[] }>('/mcp'),
+  createMcpServer: (data: Partial<McpServer>) =>
+    request<{
+      message: string;
+      server: McpServer | null;
+      sync?: { success: boolean; tools: McpToolDefinition[]; error?: string; latency_ms?: number };
+    }>('/mcp', { method: 'POST', body: JSON.stringify(data) }),
+  updateMcpServer: (id: number, data: Partial<McpServer>) =>
+    request<{ message: string; server: McpServer | null }>(`/mcp/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteMcpServer: (id: number) => request<{ message: string }>(`/mcp/${id}`, { method: 'DELETE' }),
+  testMcpServer: (id: number) =>
+    request<{
+      success: boolean;
+      tools: McpToolDefinition[];
+      error?: string;
+      latency_ms?: number;
+      server: McpServer | null;
+    }>(`/mcp/${id}/test`, { method: 'POST' }),
+  callMcpTool: (id: number, data: { toolName: string; arguments?: Record<string, any> }) =>
+    request<{ isError: boolean; text: string; raw?: any }>(`/mcp/${id}/call-tool`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
   // Chat
   getAvailableModels: () => request<{ models: ModelWithQuota[]; default_model_id?: number | null }>('/chat/available-models'),

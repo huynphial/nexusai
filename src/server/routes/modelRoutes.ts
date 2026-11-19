@@ -18,11 +18,24 @@ function maskToken(token?: string) {
 router.get('/', async (req: CustomRequest, res: Response) => {
   try {
     const models = await query(`SELECT * FROM ai_models ORDER BY id DESC`);
-    const sanitized = models.map((m: any) => ({
-      ...m,
-      has_token: !!m.api_token,
-      masked_token: maskToken(m.api_token)
-    }));
+    const sanitized = models.map((m: any) => {
+      let parsedMcpIds: number[] = [];
+      if (m.mcp_server_ids) {
+        try {
+          const arr = JSON.parse(m.mcp_server_ids);
+          if (Array.isArray(arr)) parsedMcpIds = arr;
+        } catch {
+          parsedMcpIds = [];
+        }
+      }
+      return {
+        ...m,
+        enable_mcp: m.enable_mcp ?? 1,
+        mcp_server_ids: parsedMcpIds,
+        has_token: !!m.api_token,
+        masked_token: maskToken(m.api_token)
+      };
+    });
     res.json({ models: sanitized });
   } catch (err: any) {
     res.status(500).json({ error: 'Không thể lấy danh sách mô hình AI.' });
@@ -49,6 +62,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
       max_tokens,
       presence_penalty,
       frequency_penalty,
+      enable_mcp,
+      mcp_server_ids,
       is_active
     } = req.body;
 
@@ -61,15 +76,17 @@ router.post('/', async (req: CustomRequest, res: Response) => {
     const parsedMaxTokens = max_tokens !== undefined && max_tokens !== '' ? Math.max(0, Math.round(Number(max_tokens))) : 0;
     const parsedPresence = presence_penalty !== undefined && presence_penalty !== '' ? Number(presence_penalty) : 0;
     const parsedFrequency = frequency_penalty !== undefined && frequency_penalty !== '' ? Number(frequency_penalty) : 0;
+    const mcpIdsJson = Array.isArray(mcp_server_ids) ? JSON.stringify(mcp_server_ids) : '';
 
     const result = await run(
       `
       INSERT INTO ai_models (
         name, provider, model_identifier, api_url, api_token, system_prompt,
         timeout_seconds, enable_stream, enable_thinking,
-        temperature, top_p, max_tokens, presence_penalty, frequency_penalty, is_active
+        temperature, top_p, max_tokens, presence_penalty, frequency_penalty,
+        enable_mcp, mcp_server_ids, is_active
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         name.trim(),
@@ -86,6 +103,8 @@ router.post('/', async (req: CustomRequest, res: Response) => {
         Number.isFinite(parsedMaxTokens) ? parsedMaxTokens : 0,
         Number.isFinite(parsedPresence) ? parsedPresence : 0,
         Number.isFinite(parsedFrequency) ? parsedFrequency : 0,
+        enable_mcp !== undefined ? (enable_mcp ? 1 : 0) : 1,
+        mcpIdsJson,
         is_active !== undefined ? (is_active ? 1 : 0) : 1
       ]
     );
@@ -125,6 +144,8 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       max_tokens,
       presence_penalty,
       frequency_penalty,
+      enable_mcp,
+      mcp_server_ids,
       is_active
     } = req.body;
 
@@ -143,6 +164,9 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
     const nextMaxTokens = max_tokens !== undefined && max_tokens !== '' ? Math.max(0, Math.round(Number(max_tokens))) : (existing.max_tokens ?? 0);
     const nextPresence = presence_penalty !== undefined && presence_penalty !== '' ? Number(presence_penalty) : (existing.presence_penalty ?? 0);
     const nextFrequency = frequency_penalty !== undefined && frequency_penalty !== '' ? Number(frequency_penalty) : (existing.frequency_penalty ?? 0);
+    const nextMcpIds = mcp_server_ids !== undefined
+      ? (Array.isArray(mcp_server_ids) ? JSON.stringify(mcp_server_ids) : '')
+      : (existing.mcp_server_ids || '');
 
     await run(
       `
@@ -150,7 +174,7 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       SET name = ?, provider = ?, model_identifier = ?, api_url = ?, api_token = ?, system_prompt = ?,
           timeout_seconds = ?, enable_stream = ?, enable_thinking = ?,
           temperature = ?, top_p = ?, max_tokens = ?, presence_penalty = ?, frequency_penalty = ?,
-          is_active = ?
+          enable_mcp = ?, mcp_server_ids = ?, is_active = ?
       WHERE id = ?
       `,
       [
@@ -168,6 +192,8 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
         Number.isFinite(nextMaxTokens) ? nextMaxTokens : 0,
         Number.isFinite(nextPresence) ? nextPresence : 0,
         Number.isFinite(nextFrequency) ? nextFrequency : 0,
+        enable_mcp !== undefined ? (enable_mcp ? 1 : 0) : (existing.enable_mcp ?? 1),
+        nextMcpIds,
         is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active,
         modelId
       ]

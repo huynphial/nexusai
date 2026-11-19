@@ -28,6 +28,7 @@ import {
   Terminal,
   Lock,
   Bug,
+  Plug,
 } from 'lucide-react';
 
 interface Props {
@@ -185,6 +186,14 @@ export const ChatWindow: React.FC<Props> = ({
                   RAG
                 </span>
               )}
+              {selectedModel?.mcp_enabled_for_user && (
+                <span
+                  title={`MCP đang bật: ${(selectedModel.active_mcp_servers || []).map((s) => s.name).join(', ')}`}
+                  className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.2 rounded font-semibold bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20 shrink-0"
+                >
+                  <Plug className="w-2.5 h-2.5" /> MCP
+                </span>
+              )}
               <ChevronDown
                 className={`w-3.5 h-3.5 text-slate-400 transition-transform ${
                   isModelDropdownOpen ? 'rotate-180' : ''
@@ -239,6 +248,14 @@ export const ChatWindow: React.FC<Props> = ({
                               {m.provider === 'step_progress' && (
                                 <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0">
                                   Suy luận từng bước
+                                </span>
+                              )}
+                              {m.mcp_enabled_for_user && (
+                                <span
+                                  title={`MCP: ${(m.active_mcp_servers || []).map((s) => s.name).join(', ')}`}
+                                  className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20 shrink-0"
+                                >
+                                  MCP ({m.active_mcp_servers?.length || 0})
                                 </span>
                               )}
                               {m.is_default && (

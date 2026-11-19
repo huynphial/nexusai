@@ -18,6 +18,14 @@ export interface UserGroup {
   default_model_id?: number | null;
   default_model_name?: string | null;
   enable_debug_thinking?: number | boolean;
+  enable_mcp?: number | boolean;
+  mcp_server_ids?: number[];
+  mcp_servers?: Array<{
+    id: number;
+    name: string;
+    transport: string;
+    is_active: number | boolean;
+  }>;
   created_at?: string;
   member_count?: number;
   access_rules?: GroupModelAccess[];
@@ -65,7 +73,37 @@ export interface AIModel {
   max_tokens?: number;
   presence_penalty?: number;
   frequency_penalty?: number;
+  enable_mcp?: number | boolean;
+  mcp_server_ids?: number[];
   is_active: number | boolean;
+  created_at?: string;
+}
+
+export interface McpToolDefinition {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, any>;
+}
+
+export interface McpServer {
+  id: number;
+  name: string;
+  description?: string;
+  transport: 'streamable_http' | 'sse' | 'stdio';
+  url?: string;
+  headers_json?: string;
+  command?: string;
+  args_json?: string;
+  env_json?: string;
+  timeout_seconds?: number;
+  is_active: number | boolean;
+  last_status?: 'connected' | 'error' | 'unknown';
+  last_error?: string;
+  tools?: McpToolDefinition[];
+  tools_count?: number;
+  allowed_group_ids?: number[];
+  allowed_groups?: Array<{ id: number; name: string; enable_mcp?: number | boolean }>;
+  last_checked_at?: string;
   created_at?: string;
 }
 
@@ -90,6 +128,8 @@ export interface ModelWithQuota extends AIModel {
   allowed?: boolean;
   disallow_reason?: string;
   is_default?: boolean;
+  mcp_enabled_for_user?: boolean;
+  active_mcp_servers?: Array<{ id: number; name: string }>;
   quota?: {
     user_requests: number;
     user_tokens: number;

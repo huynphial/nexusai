@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { logger } from './logger';
+import { getMcpToolBindingsForModel, callMcpTool, McpToolBinding } from './mcpClient';
 
 export interface ChatMessageItem {
   role: 'user' | 'assistant' | 'system';
@@ -22,6 +23,8 @@ export interface AIModelConfig {
   max_tokens?: number;
   presence_penalty?: number;
   frequency_penalty?: number;
+  enable_mcp?: number | boolean;
+  mcp_server_ids?: number[] | string;
 }
 
 export interface StreamChunk {
@@ -66,6 +69,7 @@ export interface UserInfoTracing {
   email?: string;
   id?: number | string;
   role?: string;
+  group_id?: number;
 }
 
 export async function generateAIChatResponse(
@@ -90,9 +94,34 @@ export async function generateAIChatResponse(
     abortController.abort(new Error(`Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`));
   }, timeoutSeconds * 1000);
 
+  const isMcpEnabled = modelConfig.enable_mcp !== 0 && modelConfig.enable_mcp !== false;
+  let parsedMcpServerIds: number[] = [];
+  if (Array.isArray(modelConfig.mcp_server_ids)) {
+    parsedMcpServerIds = modelConfig.mcp_server_ids;
+  } else if (typeof modelConfig.mcp_server_ids === 'string' && modelConfig.mcp_server_ids.trim()) {
+    try {
+      const parsed = JSON.parse(modelConfig.mcp_server_ids);
+      if (Array.isArray(parsed)) parsedMcpServerIds = parsed;
+    } catch {
+      parsedMcpServerIds = [];
+    }
+  }
+
+  let mcpBindings: McpToolBinding[] = [];
+  if (isMcpEnabled) {
+    try {
+      mcpBindings = await getMcpToolBindingsForModel(
+        parsedMcpServerIds.length > 0 ? parsedMcpServerIds : null,
+        userInfo?.group_id
+      );
+    } catch (mcpLoadErr: any) {
+      logger.warn('AIProvider', `Failed loading MCP bindings: ${mcpLoadErr.message}`);
+    }
+  }
+
   try {
     if (modelConfig.provider === 'gemini') {
-      // 1. Gemini Server-Side Execution
+      // 1. Gemini Server-Side Execution (with optional MCP Function Calling)
       const apiKey = process.env.GEMINI_API_KEY || '';
       const modelName = modelConfig.model_identifier || 'gemini-3.8-flash';
 
@@ -109,13 +138,17 @@ export async function generateAIChatResponse(
         },
       });
 
-      const formattedContents = messages.map((m) => ({
+      const formattedContents: any[] = messages.map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: m.content }],
       }));
+      if (formattedContents.length === 0) {
+        formattedContents.push({ role: 'user', parts: [{ text: 'Xin chào' }] });
+      }
 
       let accumulatedText = '';
       let accumulatedThinking = '';
+      const geminiSteps: any[] = [];
 
       const modelTemp = typeof modelConfig.temperature === 'number' ? modelConfig.temperature : 0.7;
       const modelTopP = typeof modelConfig.top_p === 'number' ? modelConfig.top_p : 0.95;
@@ -129,54 +162,150 @@ export async function generateAIChatResponse(
       if (modelMaxTokens) {
         geminiConfig.maxOutputTokens = modelMaxTokens;
       }
+      if (mcpBindings.length > 0) {
+        geminiConfig.tools = [
+          {
+            functionDeclarations: mcpBindings.map((b) => ({
+              name: b.qualifiedName,
+              description: b.description,
+              parametersJsonSchema: b.inputSchema || { type: 'object', properties: {} },
+            })),
+          },
+        ];
+      }
 
-      if (isStreamWanted) {
-        // Streaming via Gemini SDK
-        const streamResult = await ai.models.generateContentStream({
-          model: modelName,
-          contents: formattedContents.length > 0 ? (formattedContents as any) : 'Xin chào',
-          config: geminiConfig,
-        });
+      const MAX_TOOL_TURNS = 6;
+      for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        let turnFunctionCalls: Array<{ name: string; args: Record<string, any> }> = [];
 
-        let inThinkingMode = false;
-        for await (const chunk of streamResult) {
-          if (abortController.signal.aborted) {
-            throw new Error(`Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
-          }
-          const chunkText = chunk.text || '';
-          if (!chunkText) continue;
+        if (isStreamWanted) {
+          const streamResult = await ai.models.generateContentStream({
+            model: modelName,
+            contents: formattedContents as any,
+            config: geminiConfig,
+          });
 
-          if (allowThinking && (chunkText.includes('<think>') || inThinkingMode)) {
-            if (chunkText.includes('<think>')) inThinkingMode = true;
-            if (chunkText.includes('</think>')) inThinkingMode = false;
+          let inThinkingMode = false;
+          for await (const chunk of streamResult) {
+            if (abortController.signal.aborted) {
+              throw new Error(`Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+            }
+            if (Array.isArray(chunk.functionCalls) && chunk.functionCalls.length > 0) {
+              for (const fc of chunk.functionCalls) {
+                if (fc.name) {
+                  turnFunctionCalls.push({ name: fc.name, args: (fc.args as Record<string, any>) || {} });
+                }
+              }
+            }
+            const chunkText = chunk.text || '';
+            if (!chunkText) continue;
 
-            const extracted = extractThinkingFromContent(accumulatedText + chunkText);
-            if (extracted.thinkingContent) {
-              accumulatedThinking = extracted.thinkingContent;
-              onChunk({ type: 'thinking', text: chunkText.replace(/<\/?think>/g, '') });
+            if (allowThinking && (chunkText.includes('<think>') || inThinkingMode)) {
+              if (chunkText.includes('<think>')) inThinkingMode = true;
+              if (chunkText.includes('</think>')) inThinkingMode = false;
+
+              const extracted = extractThinkingFromContent(accumulatedText + chunkText);
+              if (extracted.thinkingContent) {
+                accumulatedThinking = extracted.thinkingContent;
+                onChunk({ type: 'thinking', text: chunkText.replace(/<\/?think>/g, '') });
+              } else {
+                accumulatedText += chunkText;
+                onChunk({ type: 'content', text: chunkText });
+              }
             } else {
               accumulatedText += chunkText;
               onChunk({ type: 'content', text: chunkText });
             }
-          } else {
-            accumulatedText += chunkText;
-            onChunk({ type: 'content', text: chunkText });
+          }
+        } else {
+          const res = await ai.models.generateContent({
+            model: modelName,
+            contents: formattedContents as any,
+            config: geminiConfig,
+          });
+          if (Array.isArray(res.functionCalls) && res.functionCalls.length > 0) {
+            for (const fc of res.functionCalls) {
+              if (fc.name) {
+                turnFunctionCalls.push({ name: fc.name, args: (fc.args as Record<string, any>) || {} });
+              }
+            }
+          }
+          if (res.text) {
+            accumulatedText += res.text;
           }
         }
-      } else {
-        // Non-streaming call
-        const res = await ai.models.generateContent({
-          model: modelName,
-          contents: formattedContents.length > 0 ? (formattedContents as any) : 'Xin chào',
-          config: geminiConfig,
+
+        if (turnFunctionCalls.length === 0) {
+          break;
+        }
+
+        // Execute requested MCP tools and feed results back to Gemini
+        formattedContents.push({
+          role: 'model',
+          parts: turnFunctionCalls.map((fc) => ({
+            functionCall: { name: fc.name, args: fc.args },
+          })),
         });
-        accumulatedText = res.text || 'Không có phản hồi từ mô hình.';
+
+        const responseParts: any[] = [];
+        for (let i = 0; i < turnFunctionCalls.length; i++) {
+          const fc = turnFunctionCalls[i];
+          const binding = mcpBindings.find((b) => b.qualifiedName === fc.name || b.originalName === fc.name);
+          const stepId = `mcp_${turn}_${i}_${Date.now()}`;
+          const stepStart = Date.now() - startTime;
+          const displayToolName = binding ? `${binding.serverName} / ${binding.originalName}` : fc.name;
+
+          const runningStep = {
+            id: stepId,
+            title: `Gọi công cụ MCP: ${displayToolName}`,
+            phase: 'tool',
+            status: 'running',
+            start_ms: stepStart,
+            end_ms: null,
+            duration_ms: null,
+            detail: `Tham số: ${JSON.stringify(fc.args)}`,
+          };
+          geminiSteps.push(runningStep);
+          if (onChunk) onChunk({ type: 'progress', step: runningStep });
+
+          const t0 = Date.now();
+          const toolResult = binding
+            ? await callMcpTool(binding.serverId, binding.originalName, fc.args)
+            : { text: `Không tìm thấy công cụ MCP "${fc.name}".`, isError: true, raw: null };
+          const toolMs = Date.now() - t0;
+
+          const doneStep = {
+            ...runningStep,
+            status: toolResult.isError ? 'error' : 'done',
+            end_ms: Date.now() - startTime,
+            duration_ms: toolMs,
+            detail: toolResult.text.slice(0, 300),
+          };
+          const sIdx = geminiSteps.findIndex((s) => s.id === stepId);
+          if (sIdx >= 0) geminiSteps[sIdx] = doneStep;
+          if (onChunk) onChunk({ type: 'progress', step: doneStep });
+
+          responseParts.push({
+            functionResponse: {
+              name: fc.name,
+              response: { result: toolResult.text },
+            },
+          });
+        }
+
+        formattedContents.push({
+          role: 'user',
+          parts: responseParts,
+        });
+      }
+
+      if (!accumulatedText && !accumulatedThinking) {
+        accumulatedText = 'Không có phản hồi từ mô hình.';
       }
 
       clearTimeout(timer);
       const latencyMs = Date.now() - startTime;
 
-      // Extract thinking tags if present
       const extracted = extractThinkingFromContent(accumulatedText);
       const finalContent = extracted.cleanContent;
       const finalThinking = accumulatedThinking || extracted.thinkingContent;
@@ -190,6 +319,7 @@ export async function generateAIChatResponse(
       return {
         content: finalContent,
         thinking_content: allowThinking ? finalThinking : undefined,
+        progress_steps: geminiSteps.length > 0 ? geminiSteps : undefined,
         tokensUsed: totalTokens,
         latency_ms: latencyMs,
         tokens_per_second: tokensPerSecond,
@@ -286,107 +416,17 @@ export async function generateAIChatResponse(
       const modelPresence = typeof modelConfig.presence_penalty === 'number' ? modelConfig.presence_penalty : 0;
       const modelFrequency = typeof modelConfig.frequency_penalty === 'number' ? modelConfig.frequency_penalty : 0;
 
-      const requestPayload: any = {
-        model: modelId,
-        messages: fullMessages,
-        stream: !!isStreamWanted,
-      };
+      const openAiTools = mcpBindings.map((b) => ({
+        type: 'function',
+        function: {
+          name: b.qualifiedName,
+          description: b.description,
+          parameters: b.inputSchema || { type: 'object', properties: {} },
+        },
+      }));
 
-      if (isOllamaNative) {
-        const ollamaOpts: any = {
-          temperature: modelTemp,
-          top_p: modelTopP,
-        };
-        if (modelMaxTokens > 0) ollamaOpts.num_predict = modelMaxTokens;
-        if (modelPresence !== 0) ollamaOpts.presence_penalty = modelPresence;
-        if (modelFrequency !== 0) ollamaOpts.frequency_penalty = modelFrequency;
-        requestPayload.options = ollamaOpts;
-        requestPayload.think = allowThinking;
-      } else {
-        requestPayload.temperature = modelTemp;
-        requestPayload.top_p = modelTopP;
-        if (modelMaxTokens > 0) requestPayload.max_tokens = modelMaxTokens;
-        if (modelPresence !== 0) requestPayload.presence_penalty = modelPresence;
-        if (modelFrequency !== 0) requestPayload.frequency_penalty = modelFrequency;
-        if (allowThinking) {
-          requestPayload.think = true;
-        } else if (!baseUrl.includes('api.openai.com')) {
-          requestPayload.think = false;
-        }
-      }
-
-      if (sessionId !== undefined && sessionId !== null) {
-        requestPayload.session_id = sessionId;
-      }
-      if (userInfo?.id !== undefined && userInfo?.id !== null) {
-        requestPayload.user_id = userInfo.id;
-      }
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'X-Progress-Mode': 'event',
-      };
-
-      if (userInfo?.name) {
-        headers['X-User-Name'] = encodeURIComponent(userInfo.name);
-      }
-      if (userInfo?.email) {
-        headers['X-User-Email'] = userInfo.email;
-      }
-      if (userInfo?.id !== undefined && userInfo?.id !== null) {
-        headers['X-User-Id'] = String(userInfo.id);
-      }
-      if (userInfo?.role) {
-        headers['X-User-Role'] = userInfo.role;
-      }
-      if (sessionId !== undefined && sessionId !== null) {
-        headers['X-Session-Id'] = String(sessionId);
-      }
-
-      if (apiToken) {
-        headers['Authorization'] = `Bearer ${apiToken}`;
-      }
-
-      let response: Response;
-      try {
-        response = await fetch(endpointUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestPayload),
-          signal: abortController.signal,
-        });
-      } catch (fetchErr: any) {
-        if (isStepProgress) {
-          logger.info('AIProvider', `Local step_progress endpoint unreachable (${fetchErr.message}). Switching to realistic simulated execution.`);
-          clearTimeout(timer);
-          return await simulateStepProgress(
-            modelConfig,
-            messages,
-            allowThinking,
-            Boolean(isStreamWanted),
-            startTime,
-            onChunk
-          );
-        }
-        throw fetchErr;
-      }
-
-      if (!response.ok) {
-        clearTimeout(timer);
-        const errText = await response.text();
-        if (isStepProgress) {
-          logger.warn('AIProvider', `step_progress HTTP ${response.status}. Falling back to simulation.`);
-          return await simulateStepProgress(
-            modelConfig,
-            messages,
-            allowThinking,
-            Boolean(isStreamWanted),
-            startTime,
-            onChunk
-          );
-        }
-        throw new Error(`HTTP ${response.status}: ${errText}`);
-      }
+      const conversationMessages: any[] = [...fullMessages];
+      let toolsEnabledForRequest = openAiTools.length > 0;
 
       let accumulatedContent = '';
       let accumulatedThinking = '';
@@ -395,244 +435,516 @@ export async function generateAIChatResponse(
       let accumulatedChoices: any = undefined;
       let reportedTotalTokens = 0;
 
-      if (isStreamWanted && response.body && onChunk) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-        let inThinkingTag = false;
-        let tagBuffer = '';
+      const MAX_TOOL_TURNS = 6;
 
-        const getPartialSuffixMatch = (str: string, tag: string): number => {
-          const maxLen = Math.min(str.length, tag.length - 1);
-          for (let len = maxLen; len > 0; len--) {
-            if (tag.startsWith(str.slice(-len))) {
-              return len;
-            }
-          }
-          return 0;
+      for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        const requestPayload: any = {
+          model: modelId,
+          messages: conversationMessages,
+          stream: !!isStreamWanted,
         };
 
-        const emitContentWithThinkTags = (chunkText: string) => {
-          tagBuffer += chunkText;
-          while (tagBuffer.length > 0) {
-            if (inThinkingTag) {
-              const closeIdx = tagBuffer.indexOf('</think>');
-              if (closeIdx !== -1) {
-                const thinkPart = tagBuffer.slice(0, closeIdx);
-                if (thinkPart && allowThinking) {
-                  accumulatedThinking += thinkPart;
-                  onChunk({ type: 'thinking', text: thinkPart });
-                }
-                tagBuffer = tagBuffer.slice(closeIdx + '</think>'.length);
-                inThinkingTag = false;
-              } else {
-                const partialLen = getPartialSuffixMatch(tagBuffer, '</think>');
-                const safeLen = tagBuffer.length - partialLen;
-                if (safeLen > 0) {
-                  const thinkPart = tagBuffer.slice(0, safeLen);
-                  if (allowThinking) {
+        if (isOllamaNative) {
+          const ollamaOpts: any = {
+            temperature: modelTemp,
+            top_p: modelTopP,
+          };
+          if (modelMaxTokens > 0) ollamaOpts.num_predict = modelMaxTokens;
+          if (modelPresence !== 0) ollamaOpts.presence_penalty = modelPresence;
+          if (modelFrequency !== 0) ollamaOpts.frequency_penalty = modelFrequency;
+          requestPayload.options = ollamaOpts;
+          requestPayload.think = allowThinking;
+        } else {
+          requestPayload.temperature = modelTemp;
+          requestPayload.top_p = modelTopP;
+          if (modelMaxTokens > 0) requestPayload.max_tokens = modelMaxTokens;
+          if (modelPresence !== 0) requestPayload.presence_penalty = modelPresence;
+          if (modelFrequency !== 0) requestPayload.frequency_penalty = modelFrequency;
+          if (allowThinking) {
+            requestPayload.think = true;
+          } else if (!baseUrl.includes('api.openai.com')) {
+            requestPayload.think = false;
+          }
+        }
+
+        if (toolsEnabledForRequest) {
+          requestPayload.tools = openAiTools;
+          if (!isOllamaNative) {
+            requestPayload.tool_choice = 'auto';
+          }
+        }
+
+        if (sessionId !== undefined && sessionId !== null) {
+          requestPayload.session_id = sessionId;
+        }
+        if (userInfo?.id !== undefined && userInfo?.id !== null) {
+          requestPayload.user_id = userInfo.id;
+        }
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'X-Progress-Mode': 'event',
+        };
+
+        if (userInfo?.name) {
+          headers['X-User-Name'] = encodeURIComponent(userInfo.name);
+        }
+        if (userInfo?.email) {
+          headers['X-User-Email'] = userInfo.email;
+        }
+        if (userInfo?.id !== undefined && userInfo?.id !== null) {
+          headers['X-User-Id'] = String(userInfo.id);
+        }
+        if (userInfo?.role) {
+          headers['X-User-Role'] = userInfo.role;
+        }
+        if (sessionId !== undefined && sessionId !== null) {
+          headers['X-Session-Id'] = String(sessionId);
+        }
+
+        if (apiToken) {
+          headers['Authorization'] = `Bearer ${apiToken}`;
+        }
+
+        let response: Response;
+        try {
+          response = await fetch(endpointUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(requestPayload),
+            signal: abortController.signal,
+          });
+        } catch (fetchErr: any) {
+          if (isStepProgress && turn === 0) {
+            logger.info('AIProvider', `Local step_progress endpoint unreachable (${fetchErr.message}). Switching to realistic simulated execution.`);
+            clearTimeout(timer);
+            return await simulateStepProgress(
+              modelConfig,
+              messages,
+              allowThinking,
+              Boolean(isStreamWanted),
+              startTime,
+              onChunk
+            );
+          }
+          throw fetchErr;
+        }
+
+        if (!response.ok) {
+          const errText = await response.text();
+          // Graceful fallback if Ollama/upstream model doesn't support `tools`
+          if (toolsEnabledForRequest && response.status === 400 && /tool|function/i.test(errText)) {
+            logger.warn('AIProvider', `Model "${modelId}" rejected tools parameter (${errText.slice(0, 150)}). Retrying without MCP tools.`);
+            toolsEnabledForRequest = false;
+            continue;
+          }
+
+          clearTimeout(timer);
+          if (isStepProgress && turn === 0) {
+            logger.warn('AIProvider', `step_progress HTTP ${response.status}. Falling back to simulation.`);
+            return await simulateStepProgress(
+              modelConfig,
+              messages,
+              allowThinking,
+              Boolean(isStreamWanted),
+              startTime,
+              onChunk
+            );
+          }
+          throw new Error(`HTTP ${response.status}: ${errText}`);
+        }
+
+        let turnContent = '';
+        const turnToolCallMap = new Map<
+          number,
+          { id: string; name: string; argumentsStr: string; argumentsObj: Record<string, any> | null }
+        >();
+
+        if (isStreamWanted && response.body && onChunk) {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buffer = '';
+          let inThinkingTag = false;
+          let tagBuffer = '';
+
+          const getPartialSuffixMatch = (str: string, tag: string): number => {
+            const maxLen = Math.min(str.length, tag.length - 1);
+            for (let len = maxLen; len > 0; len--) {
+              if (tag.startsWith(str.slice(-len))) {
+                return len;
+              }
+            }
+            return 0;
+          };
+
+          const emitContentWithThinkTags = (chunkText: string) => {
+            tagBuffer += chunkText;
+            while (tagBuffer.length > 0) {
+              if (inThinkingTag) {
+                const closeIdx = tagBuffer.indexOf('</think>');
+                if (closeIdx !== -1) {
+                  const thinkPart = tagBuffer.slice(0, closeIdx);
+                  if (thinkPart && allowThinking) {
                     accumulatedThinking += thinkPart;
                     onChunk({ type: 'thinking', text: thinkPart });
                   }
-                  tagBuffer = tagBuffer.slice(safeLen);
+                  tagBuffer = tagBuffer.slice(closeIdx + '</think>'.length);
+                  inThinkingTag = false;
+                } else {
+                  const partialLen = getPartialSuffixMatch(tagBuffer, '</think>');
+                  const safeLen = tagBuffer.length - partialLen;
+                  if (safeLen > 0) {
+                    const thinkPart = tagBuffer.slice(0, safeLen);
+                    if (allowThinking) {
+                      accumulatedThinking += thinkPart;
+                      onChunk({ type: 'thinking', text: thinkPart });
+                    }
+                    tagBuffer = tagBuffer.slice(safeLen);
+                  }
+                  break;
                 }
-                break;
+              } else {
+                const openIdx = tagBuffer.indexOf('<think>');
+                if (openIdx !== -1) {
+                  const contentPart = tagBuffer.slice(0, openIdx);
+                  if (contentPart) {
+                    turnContent += contentPart;
+                    accumulatedContent += contentPart;
+                    onChunk({ type: 'content', text: contentPart });
+                  }
+                  tagBuffer = tagBuffer.slice(openIdx + '<think>'.length);
+                  inThinkingTag = true;
+                } else {
+                  const partialLen = getPartialSuffixMatch(tagBuffer, '<think>');
+                  const safeLen = tagBuffer.length - partialLen;
+                  if (safeLen > 0) {
+                    const contentPart = tagBuffer.slice(0, safeLen);
+                    turnContent += contentPart;
+                    accumulatedContent += contentPart;
+                    onChunk({ type: 'content', text: contentPart });
+                    tagBuffer = tagBuffer.slice(safeLen);
+                  }
+                  break;
+                }
+              }
+            }
+          };
+
+          const processStreamLine = (rawLine: string) => {
+            const trimmed = rawLine.trim();
+            if (!trimmed || trimmed.startsWith(':')) return;
+
+            const jsonStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+            if (!jsonStr || jsonStr === '[DONE]') return;
+            if (!jsonStr.startsWith('{')) return;
+
+            try {
+              const parsed = JSON.parse(jsonStr);
+
+              // Track reported token counts if available
+              if (typeof parsed.usage?.total_tokens === 'number') {
+                reportedTotalTokens += parsed.usage.total_tokens;
+              } else if (typeof parsed.eval_count === 'number' || typeof parsed.prompt_eval_count === 'number') {
+                reportedTotalTokens += (parsed.prompt_eval_count || 0) + (parsed.eval_count || 0);
+              }
+
+              // A. Check if the parsed chunk itself is a choices event
+              if (
+                parsed.type === 'choices' ||
+                parsed.type === 'choices_prompt' ||
+                (parsed.options && Array.isArray(parsed.options) && parsed.prompt)
+              ) {
+                accumulatedChoices = parsed;
+                onChunk({ type: 'choices', choices: parsed });
+                return;
+              }
+
+              // B. Check top-level x_choices property
+              if (parsed.x_choices) {
+                accumulatedChoices = parsed.x_choices;
+                onChunk({ type: 'choices', choices: parsed.x_choices });
+                return;
+              }
+
+              // C. Extract active message/delta object across OpenAI SSE & Ollama NDJSON formats
+              const delta = parsed.choices?.[0]?.delta || parsed.delta;
+              const ollamaMessage = parsed.message;
+              const choiceMessage = parsed.choices?.[0]?.message;
+              const chunkObj = delta || ollamaMessage || choiceMessage;
+
+              if (chunkObj?.x_choices) {
+                accumulatedChoices = chunkObj.x_choices;
+                onChunk({ type: 'choices', choices: chunkObj.x_choices });
+              } else if (chunkObj?.choices && typeof chunkObj.choices === 'object' && Array.isArray(chunkObj.choices.options)) {
+                accumulatedChoices = chunkObj.choices;
+                onChunk({ type: 'choices', choices: chunkObj.choices });
+              }
+
+              // 1. Check x_progress structured step/summary event
+              const progressPayload = chunkObj?.x_progress || parsed.x_progress;
+              if (progressPayload) {
+                const xp = progressPayload;
+                if (xp.type === 'step' && xp.step) {
+                  const stepItem = xp.step;
+                  const existingIdx = accumulatedSteps.findIndex((s) => s.id === stepItem.id);
+                  if (existingIdx >= 0) {
+                    accumulatedSteps[existingIdx] = { ...accumulatedSteps[existingIdx], ...stepItem };
+                  } else {
+                    accumulatedSteps.push(stepItem);
+                  }
+                  onChunk({ type: 'progress', step: stepItem });
+                } else if (xp.type === 'summary') {
+                  accumulatedSummary = xp;
+                  if (Array.isArray(xp.steps)) {
+                    for (const s of xp.steps) {
+                      const idx = accumulatedSteps.findIndex((item) => item.id === s.id);
+                      if (idx >= 0) accumulatedSteps[idx] = { ...accumulatedSteps[idx], ...s };
+                      else accumulatedSteps.push(s);
+                    }
+                  }
+                  onChunk({ type: 'progress', summary: xp });
+                }
+              }
+
+              // 2. Check tool_calls (Ollama native message.tool_calls or OpenAI SSE delta.tool_calls)
+              const rawToolCalls = chunkObj?.tool_calls;
+              if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+                rawToolCalls.forEach((tc: any, arrayIdx: number) => {
+                  const idx = typeof tc.index === 'number' ? tc.index : turnToolCallMap.size + arrayIdx;
+                  const existingKey = typeof tc.index === 'number' ? tc.index : arrayIdx;
+                  if (!turnToolCallMap.has(existingKey)) {
+                    turnToolCallMap.set(existingKey, {
+                      id: tc.id || `call_${turn}_${idx}`,
+                      name: '',
+                      argumentsStr: '',
+                      argumentsObj: null,
+                    });
+                  }
+                  const entry = turnToolCallMap.get(existingKey)!;
+                  if (tc.id) entry.id = tc.id;
+                  if (tc.function?.name) entry.name += tc.function.name;
+                  if (typeof tc.function?.arguments === 'string') {
+                    entry.argumentsStr += tc.function.arguments;
+                  } else if (tc.function?.arguments && typeof tc.function.arguments === 'object') {
+                    entry.argumentsObj = tc.function.arguments;
+                  }
+                });
+              }
+
+              // 3. Check thinking / reasoning_content / reasoning
+              const reasoningText =
+                chunkObj?.thinking ??
+                chunkObj?.reasoning_content ??
+                chunkObj?.reasoning ??
+                parsed.thinking ??
+                parsed.reasoning_content ??
+                parsed.reasoning ??
+                '';
+
+              if (typeof reasoningText === 'string' && reasoningText.length > 0 && allowThinking) {
+                accumulatedThinking += reasoningText;
+                onChunk({ type: 'thinking', text: reasoningText });
+              }
+
+              // 4. Check regular content
+              const contentChunk =
+                typeof chunkObj?.content === 'string'
+                  ? chunkObj.content
+                  : typeof parsed.response === 'string'
+                  ? parsed.response
+                  : '';
+
+              if (contentChunk.length > 0) {
+                emitContentWithThinkTags(contentChunk);
+              }
+            } catch {
+              // Ignore partial or malformed JSON lines
+            }
+          };
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              processStreamLine(line);
+            }
+          }
+
+          if (buffer.trim()) {
+            processStreamLine(buffer);
+          }
+          if (tagBuffer.length > 0) {
+            if (inThinkingTag) {
+              if (allowThinking) {
+                accumulatedThinking += tagBuffer;
+                onChunk({ type: 'thinking', text: tagBuffer });
               }
             } else {
-              const openIdx = tagBuffer.indexOf('<think>');
-              if (openIdx !== -1) {
-                const contentPart = tagBuffer.slice(0, openIdx);
-                if (contentPart) {
-                  accumulatedContent += contentPart;
-                  onChunk({ type: 'content', text: contentPart });
-                }
-                tagBuffer = tagBuffer.slice(openIdx + '<think>'.length);
-                inThinkingTag = true;
-              } else {
-                const partialLen = getPartialSuffixMatch(tagBuffer, '<think>');
-                const safeLen = tagBuffer.length - partialLen;
-                if (safeLen > 0) {
-                  const contentPart = tagBuffer.slice(0, safeLen);
-                  accumulatedContent += contentPart;
-                  onChunk({ type: 'content', text: contentPart });
-                  tagBuffer = tagBuffer.slice(safeLen);
-                }
-                break;
-              }
+              turnContent += tagBuffer;
+              accumulatedContent += tagBuffer;
+              onChunk({ type: 'content', text: tagBuffer });
             }
+            tagBuffer = '';
           }
-        };
+        } else {
+          const data = await response.json();
+          const messageObj = data.choices?.[0]?.message || data.message;
+          const rawContent = messageObj?.content ?? data.response ?? '';
+          const reasoningContent =
+            messageObj?.thinking ||
+            messageObj?.reasoning_content ||
+            messageObj?.reasoning ||
+            data.thinking ||
+            data.reasoning_content ||
+            data.reasoning ||
+            '';
 
-        const processStreamLine = (rawLine: string) => {
-          const trimmed = rawLine.trim();
-          if (!trimmed || trimmed.startsWith(':')) return;
-
-          const jsonStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
-          if (!jsonStr || jsonStr === '[DONE]') return;
-          if (!jsonStr.startsWith('{')) return;
-
-          try {
-            const parsed = JSON.parse(jsonStr);
-
-            // Track reported token counts if available
-            if (typeof parsed.usage?.total_tokens === 'number') {
-              reportedTotalTokens = parsed.usage.total_tokens;
-            } else if (typeof parsed.eval_count === 'number' || typeof parsed.prompt_eval_count === 'number') {
-              reportedTotalTokens = (parsed.prompt_eval_count || 0) + (parsed.eval_count || 0);
-            }
-
-            // A. Check if the parsed chunk itself is a choices event (e.g. {"v": 1, "type": "choices", "options": [...]})
-            if (
-              parsed.type === 'choices' ||
-              parsed.type === 'choices_prompt' ||
-              (parsed.options && Array.isArray(parsed.options) && parsed.prompt)
-            ) {
-              accumulatedChoices = parsed;
-              onChunk({ type: 'choices', choices: parsed });
-              return;
-            }
-
-            // B. Check top-level x_choices property (e.g. {"x_choices": {...}})
-            if (parsed.x_choices) {
-              accumulatedChoices = parsed.x_choices;
-              onChunk({ type: 'choices', choices: parsed.x_choices });
-              return;
-            }
-
-            // C. Extract active message/delta object across OpenAI SSE & Ollama NDJSON formats
-            const delta = parsed.choices?.[0]?.delta || parsed.delta;
-            const ollamaMessage = parsed.message;
-            const choiceMessage = parsed.choices?.[0]?.message;
-            const chunkObj = delta || ollamaMessage || choiceMessage;
-
-            if (chunkObj?.x_choices) {
-              accumulatedChoices = chunkObj.x_choices;
-              onChunk({ type: 'choices', choices: chunkObj.x_choices });
-            } else if (chunkObj?.choices && typeof chunkObj.choices === 'object' && Array.isArray(chunkObj.choices.options)) {
-              accumulatedChoices = chunkObj.choices;
-              onChunk({ type: 'choices', choices: chunkObj.choices });
-            }
-
-            // 1. Check x_progress structured step/summary event
-            const progressPayload = chunkObj?.x_progress || parsed.x_progress;
-            if (progressPayload) {
-              const xp = progressPayload;
-              if (xp.type === 'step' && xp.step) {
-                const stepItem = xp.step;
-                const existingIdx = accumulatedSteps.findIndex((s) => s.id === stepItem.id);
-                if (existingIdx >= 0) {
-                  accumulatedSteps[existingIdx] = { ...accumulatedSteps[existingIdx], ...stepItem };
-                } else {
-                  accumulatedSteps.push(stepItem);
-                }
-                onChunk({ type: 'progress', step: stepItem });
-              } else if (xp.type === 'summary') {
-                accumulatedSummary = xp;
-                if (Array.isArray(xp.steps)) {
-                  for (const s of xp.steps) {
-                    const idx = accumulatedSteps.findIndex((item) => item.id === s.id);
-                    if (idx >= 0) accumulatedSteps[idx] = { ...accumulatedSteps[idx], ...s };
-                    else accumulatedSteps.push(s);
-                  }
-                }
-                onChunk({ type: 'progress', summary: xp });
-              }
-            }
-
-            // 2. Check thinking / reasoning_content / reasoning (prefer thinking/reasoning_content to preserve leading spaces)
-            const reasoningText =
-              chunkObj?.thinking ??
-              chunkObj?.reasoning_content ??
-              chunkObj?.reasoning ??
-              parsed.thinking ??
-              parsed.reasoning_content ??
-              parsed.reasoning ??
-              '';
-
-            if (typeof reasoningText === 'string' && reasoningText.length > 0 && allowThinking) {
-              accumulatedThinking += reasoningText;
-              onChunk({ type: 'thinking', text: reasoningText });
-            }
-
-            // 3. Check regular content (OpenAI delta.content, Ollama message.content or response)
-            const contentChunk =
-              typeof chunkObj?.content === 'string'
-                ? chunkObj.content
-                : typeof parsed.response === 'string'
-                ? parsed.response
-                : '';
-
-            if (contentChunk.length > 0) {
-              emitContentWithThinkTags(contentChunk);
-            }
-          } catch {
-            // Ignore partial or malformed JSON lines
+          if (typeof data.usage?.total_tokens === 'number') {
+            reportedTotalTokens += data.usage.total_tokens;
+          } else if (typeof data.eval_count === 'number' || typeof data.prompt_eval_count === 'number') {
+            reportedTotalTokens += (data.prompt_eval_count || 0) + (data.eval_count || 0);
           }
-        };
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+          if (Array.isArray(messageObj?.tool_calls)) {
+            messageObj.tool_calls.forEach((tc: any, idx: number) => {
+              const argsVal = tc.function?.arguments;
+              turnToolCallMap.set(idx, {
+                id: tc.id || `call_${turn}_${idx}`,
+                name: tc.function?.name || '',
+                argumentsStr: typeof argsVal === 'string' ? argsVal : '',
+                argumentsObj: argsVal && typeof argsVal === 'object' ? argsVal : null,
+              });
+            });
+          }
 
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
+          const extracted = extractThinkingFromContent(rawContent);
+          turnContent = extracted.cleanContent;
+          if (turnContent) {
+            accumulatedContent += (accumulatedContent ? '\n' : '') + turnContent;
+          }
+          if (reasoningContent || extracted.thinkingContent) {
+            accumulatedThinking += (accumulatedThinking ? '\n' : '') + (reasoningContent || extracted.thinkingContent || '');
+          }
 
-          for (const line of lines) {
-            processStreamLine(line);
+          if (data.x_choices) {
+            accumulatedChoices = data.x_choices;
+          } else if (messageObj?.x_choices) {
+            accumulatedChoices = messageObj.x_choices;
+          } else if (data.type === 'choices' && data.options) {
+            accumulatedChoices = data;
+          }
+
+          if (data.x_trace && Array.isArray(data.x_trace.steps)) {
+            accumulatedSteps.push(...data.x_trace.steps);
           }
         }
 
-        // Flush any remaining buffered line and tagBuffer
-        if (buffer.trim()) {
-          processStreamLine(buffer);
+        // Check if the model requested any MCP tool calls in this turn
+        const pendingToolCalls = Array.from(turnToolCallMap.values()).filter((tc) => tc.name.trim().length > 0);
+        if (pendingToolCalls.length === 0 || !toolsEnabledForRequest) {
+          if (!accumulatedContent && !accumulatedThinking && turn === 0) {
+            accumulatedContent = 'Không có phản hồi từ dịch vụ AI.';
+          }
+          break;
         }
-        if (tagBuffer.length > 0) {
-          if (inThinkingTag) {
-            if (allowThinking) {
-              accumulatedThinking += tagBuffer;
-              onChunk({ type: 'thinking', text: tagBuffer });
+
+        // Parse arguments and append assistant tool-call message to conversationMessages
+        const parsedCalls = pendingToolCalls.map((tc) => {
+          let parsedArgs: Record<string, any> = {};
+          if (tc.argumentsObj) {
+            parsedArgs = tc.argumentsObj;
+          } else if (tc.argumentsStr.trim()) {
+            try {
+              parsedArgs = JSON.parse(tc.argumentsStr);
+            } catch {
+              parsedArgs = {};
             }
+          }
+          return { ...tc, parsedArgs };
+        });
+
+        if (isOllamaNative) {
+          conversationMessages.push({
+            role: 'assistant',
+            content: turnContent || '',
+            tool_calls: parsedCalls.map((tc) => ({
+              function: {
+                name: tc.name,
+                arguments: tc.parsedArgs,
+              },
+            })),
+          });
+        } else {
+          conversationMessages.push({
+            role: 'assistant',
+            content: turnContent || null,
+            tool_calls: parsedCalls.map((tc) => ({
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.name,
+                arguments: tc.argumentsStr || JSON.stringify(tc.parsedArgs),
+              },
+            })),
+          });
+        }
+
+        // Execute each MCP tool call and feed tool results back
+        for (let i = 0; i < parsedCalls.length; i++) {
+          const tc = parsedCalls[i];
+          const binding = mcpBindings.find((b) => b.qualifiedName === tc.name || b.originalName === tc.name);
+          const stepId = `mcp_${turn}_${i}_${Date.now()}`;
+          const displayToolName = binding ? `${binding.serverName} / ${binding.originalName}` : tc.name;
+
+          const runningStep = {
+            id: stepId,
+            title: `Gọi công cụ MCP: ${displayToolName}`,
+            phase: 'tool',
+            status: 'running',
+            start_ms: Date.now() - startTime,
+            end_ms: null,
+            duration_ms: null,
+            detail: `Tham số: ${JSON.stringify(tc.parsedArgs)}`,
+          };
+          accumulatedSteps.push(runningStep);
+          if (onChunk) onChunk({ type: 'progress', step: runningStep });
+
+          const t0 = Date.now();
+          const toolResult = binding
+            ? await callMcpTool(binding.serverId, binding.originalName, tc.parsedArgs)
+            : { text: `Không tìm thấy công cụ MCP "${tc.name}".`, isError: true, raw: null };
+          const toolMs = Date.now() - t0;
+
+          const doneStep = {
+            ...runningStep,
+            status: toolResult.isError ? 'error' : 'done',
+            end_ms: Date.now() - startTime,
+            duration_ms: toolMs,
+            detail: toolResult.text.slice(0, 300),
+          };
+          const idx = accumulatedSteps.findIndex((s) => s.id === stepId);
+          if (idx >= 0) accumulatedSteps[idx] = doneStep;
+          if (onChunk) onChunk({ type: 'progress', step: doneStep });
+
+          if (isOllamaNative) {
+            conversationMessages.push({
+              role: 'tool',
+              content: toolResult.text,
+              tool_name: tc.name,
+            });
           } else {
-            accumulatedContent += tagBuffer;
-            onChunk({ type: 'content', text: tagBuffer });
+            conversationMessages.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              name: tc.name,
+              content: toolResult.text,
+            });
           }
-          tagBuffer = '';
-        }
-      } else {
-        const data = await response.json();
-        const messageObj = data.choices?.[0]?.message || data.message;
-        const rawContent = messageObj?.content ?? data.response ?? 'Không có phản hồi từ dịch vụ AI.';
-        const reasoningContent =
-          messageObj?.reasoning ||
-          messageObj?.reasoning_content ||
-          messageObj?.thinking ||
-          data.reasoning ||
-          data.reasoning_content ||
-          data.thinking ||
-          '';
-
-        if (typeof data.usage?.total_tokens === 'number') {
-          reportedTotalTokens = data.usage.total_tokens;
-        } else if (typeof data.eval_count === 'number' || typeof data.prompt_eval_count === 'number') {
-          reportedTotalTokens = (data.prompt_eval_count || 0) + (data.eval_count || 0);
-        }
-
-        const extracted = extractThinkingFromContent(rawContent);
-        accumulatedContent = extracted.cleanContent;
-        accumulatedThinking = reasoningContent || extracted.thinkingContent || '';
-
-        if (data.x_choices) {
-          accumulatedChoices = data.x_choices;
-        } else if (messageObj?.x_choices) {
-          accumulatedChoices = messageObj.x_choices;
-        } else if (data.type === 'choices' && data.options) {
-          accumulatedChoices = data;
-        }
-
-        // If non-streaming returns x_trace or steps
-        if (data.x_trace && Array.isArray(data.x_trace.steps)) {
-          accumulatedSteps.push(...data.x_trace.steps);
         }
       }
 

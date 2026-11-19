@@ -124,6 +124,7 @@ export async function initDatabase() {
         description TEXT,
         default_model_id INTEGER,
         enable_debug_thinking INTEGER DEFAULT 0,
+        enable_mcp INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -152,7 +153,31 @@ export async function initDatabase() {
         max_tokens INTEGER DEFAULT 0,
         presence_penalty REAL DEFAULT 0,
         frequency_penalty REAL DEFAULT 0,
+        enable_mcp INTEGER DEFAULT 1,
+        mcp_server_ids TEXT,
         is_active INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // 3b. MCP Servers table
+    await run(`
+      CREATE TABLE IF NOT EXISTS mcp_servers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT,
+        transport TEXT NOT NULL DEFAULT 'streamable_http',
+        url TEXT,
+        headers_json TEXT,
+        command TEXT,
+        args_json TEXT,
+        env_json TEXT,
+        timeout_seconds INTEGER DEFAULT 30,
+        is_active INTEGER DEFAULT 1,
+        last_status TEXT DEFAULT 'unknown',
+        last_error TEXT,
+        tools_cache_json TEXT,
+        last_checked_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -168,6 +193,16 @@ export async function initDatabase() {
         max_tokens_group INTEGER NOT NULL DEFAULT 500000,
         max_tokens_per_user INTEGER NOT NULL DEFAULT 100000,
         UNIQUE(group_id, model_id)
+      )
+    `);
+
+    // 4b. Group MCP Server Access table
+    await run(`
+      CREATE TABLE IF NOT EXISTS group_mcp_access (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id INTEGER NOT NULL,
+        mcp_server_id INTEGER NOT NULL,
+        UNIQUE(group_id, mcp_server_id)
       )
     `);
 
@@ -258,6 +293,12 @@ export async function initDatabase() {
       if (!modelColNames.includes('frequency_penalty')) {
         await run(`ALTER TABLE ai_models ADD COLUMN frequency_penalty REAL DEFAULT 0`);
       }
+      if (!modelColNames.includes('enable_mcp')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN enable_mcp INTEGER DEFAULT 1`);
+      }
+      if (!modelColNames.includes('mcp_server_ids')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN mcp_server_ids TEXT`);
+      }
 
       const msgCols = await query(`PRAGMA table_info(chat_messages)`);
       const msgColNames = msgCols.map((c: any) => c.name);
@@ -279,6 +320,10 @@ export async function initDatabase() {
       if (!groupColNames.includes('default_model_id')) {
         await run(`ALTER TABLE user_groups ADD COLUMN default_model_id INTEGER`);
       }
+      if (!groupColNames.includes('enable_mcp')) {
+        await run(`ALTER TABLE user_groups ADD COLUMN enable_mcp INTEGER DEFAULT 0`);
+        await run(`UPDATE user_groups SET enable_mcp = 1 WHERE name LIKE '%Quản Trị%' OR name LIKE '%Admin%'`);
+      }
     } catch (migErr) {
       console.warn('[Database] Column migration notice:', migErr);
     }
@@ -295,7 +340,7 @@ async function seedDefaults() {
   let adminGroup = await getOne(`SELECT * FROM user_groups WHERE name LIKE '%Quản Trị%' OR name LIKE '%Admin%' LIMIT 1`);
   if (!adminGroup) {
     const res = await run(
-      `INSERT INTO user_groups (name, description, enable_debug_thinking) VALUES (?, ?, 1)`,
+      `INSERT INTO user_groups (name, description, enable_debug_thinking, enable_mcp) VALUES (?, ?, 1, 1)`,
       [
         'Nhóm Quản Trị (Admin)',
         'Quyền quản trị toàn diện hệ thống Local AI, toàn quyền truy cập Dashboard, cấu hình mô hình, hạn ngạch và chat.'
@@ -316,7 +361,7 @@ async function seedDefaults() {
   let userGroup = await getOne(`SELECT * FROM user_groups WHERE (name LIKE '%Người Dùng%' OR name LIKE '%User%' OR name LIKE '%General%') AND id != ? LIMIT 1`, [adminGroup.id]);
   if (!userGroup) {
     const res = await run(
-      `INSERT INTO user_groups (name, description, enable_debug_thinking) VALUES (?, ?, 0)`,
+      `INSERT INTO user_groups (name, description, enable_debug_thinking, enable_mcp) VALUES (?, ?, 0, 0)`,
       [
         'Nhóm Người Dùng (User)',
         'Nhóm người dùng thông thường, chỉ được phép sử dụng giao diện Chat LLM với các mô hình được phân quyền, không truy cập giao diện quản trị.'

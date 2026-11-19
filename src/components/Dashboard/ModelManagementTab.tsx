@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { AIModel } from '../../types';
-import { Plus, Edit2, Trash2, Cpu, Clock, Radio, Brain, CheckCircle, XCircle, Sliders } from 'lucide-react';
+import { AIModel, McpServer } from '../../types';
+import { Plus, Edit2, Trash2, Cpu, Clock, Radio, Brain, CheckCircle, XCircle, Sliders, Plug } from 'lucide-react';
 
 interface Props {
   models: AIModel[];
+  mcpServers?: McpServer[];
   onCreateModel: (data: any) => Promise<void>;
   onUpdateModel: (id: number, data: any) => Promise<void>;
   onDeleteModel: (id: number) => Promise<void>;
@@ -11,6 +12,7 @@ interface Props {
 
 export const ModelManagementTab: React.FC<Props> = ({
   models,
+  mcpServers = [],
   onCreateModel,
   onUpdateModel,
   onDeleteModel,
@@ -32,6 +34,8 @@ export const ModelManagementTab: React.FC<Props> = ({
   const [maxTokens, setMaxTokens] = useState<number>(0);
   const [presencePenalty, setPresencePenalty] = useState<number>(0);
   const [frequencyPenalty, setFrequencyPenalty] = useState<number>(0);
+  const [enableMcp, setEnableMcp] = useState<boolean>(false);
+  const [mcpServerIds, setMcpServerIds] = useState<number[]>([]);
   const [isActive, setIsActive] = useState<boolean>(true);
   const [loading, setLoading] = useState(false);
 
@@ -51,6 +55,8 @@ export const ModelManagementTab: React.FC<Props> = ({
     setMaxTokens(0);
     setPresencePenalty(0);
     setFrequencyPenalty(0);
+    setEnableMcp(false);
+    setMcpServerIds([]);
     setIsActive(true);
     setIsModalOpen(true);
   };
@@ -71,8 +77,16 @@ export const ModelManagementTab: React.FC<Props> = ({
     setMaxTokens(m.max_tokens ?? 0);
     setPresencePenalty(m.presence_penalty ?? 0);
     setFrequencyPenalty(m.frequency_penalty ?? 0);
+    setEnableMcp(m.enable_mcp === 1 || m.enable_mcp === true);
+    setMcpServerIds(Array.isArray(m.mcp_server_ids) ? m.mcp_server_ids : []);
     setIsActive(m.is_active === 1 || m.is_active === true);
     setIsModalOpen(true);
+  };
+
+  const handleToggleMcpServer = (serverId: number) => {
+    setMcpServerIds((prev) =>
+      prev.includes(serverId) ? prev.filter((id) => id !== serverId) : [...prev, serverId]
+    );
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -98,6 +112,8 @@ export const ModelManagementTab: React.FC<Props> = ({
         max_tokens: maxTokens,
         presence_penalty: presencePenalty,
         frequency_penalty: frequencyPenalty,
+        enable_mcp: enableMcp ? 1 : 0,
+        mcp_server_ids: mcpServerIds,
         is_active: isActive,
       };
 
@@ -189,6 +205,11 @@ export const ModelManagementTab: React.FC<Props> = ({
                         {m.enable_thinking !== 0 && (
                           <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400 font-medium border border-purple-500/20">
                             <Brain className="w-2.5 h-2.5" /> Thinking
+                          </span>
+                        )}
+                        {(m.enable_mcp === 1 || m.enable_mcp === true) && (
+                          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 font-medium border border-cyan-500/20">
+                            <Plug className="w-2.5 h-2.5" /> MCP
                           </span>
                         )}
                         <span
@@ -359,8 +380,62 @@ export const ModelManagementTab: React.FC<Props> = ({
                     />
                     <span>Bật hiển thị quá trình suy luận (Thinking / Reasoning Box)</span>
                   </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={enableMcp}
+                      onChange={(e) => setEnableMcp(e.target.checked)}
+                      className="rounded text-cyan-600 focus:ring-cyan-500"
+                    />
+                    <span>Bật kết nối công cụ MCP Tools (Tương thích Ollama, OpenAI &amp; Gemini)</span>
+                  </label>
                 </div>
               </div>
+
+              {/* MCP Servers selection when enableMcp is checked */}
+              {enableMcp && (
+                <div className="p-3 bg-cyan-500/5 dark:bg-cyan-950/20 rounded-xl border border-cyan-500/20 space-y-2">
+                  <div className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                    <Plug className="w-3.5 h-3.5 text-cyan-500" />
+                    <span>Chọn MCP Servers áp dụng cho Model này</span>
+                  </div>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                    Nếu không chọn riêng server nào, mô hình sẽ tự động sử dụng tất cả MCP Servers đang bật.
+                  </p>
+                  {mcpServers.filter((s) => s.is_active === 1 || s.is_active === true).length === 0 ? (
+                    <div className="text-[11px] text-amber-600 dark:text-amber-400">
+                      Chưa có MCP Server nào đang bật. Hãy thêm hoặc bật MCP Server tại tab &quot;Quản Lý MCP Servers&quot;.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-32 overflow-y-auto">
+                      {mcpServers
+                        .filter((s) => s.is_active === 1 || s.is_active === true)
+                        .map((srv) => (
+                          <label
+                            key={srv.id}
+                            className="flex items-center justify-between gap-2 p-2 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 cursor-pointer hover:border-cyan-500/50"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={mcpServerIds.includes(srv.id)}
+                                onChange={() => handleToggleMcpServer(srv.id)}
+                                className="rounded text-cyan-600 focus:ring-cyan-500"
+                              />
+                              <span className="truncate font-medium text-slate-700 dark:text-slate-300">
+                                {srv.name}
+                              </span>
+                            </div>
+                            <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                              {srv.tools_count || 0} tools
+                            </span>
+                          </label>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Basic LLM Generation Parameters */}
               <div className="p-3 bg-slate-50 dark:bg-slate-950/60 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2.5">

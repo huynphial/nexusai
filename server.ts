@@ -13,6 +13,7 @@ import groupRoutes from './src/server/routes/groupRoutes';
 import modelRoutes from './src/server/routes/modelRoutes';
 import chatRoutes from './src/server/routes/chatRoutes';
 import dashboardRoutes from './src/server/routes/dashboardRoutes';
+import mcpRoutes from './src/server/routes/mcpRoutes';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +46,7 @@ app.use('/api/groups', groupRoutes);
 app.use('/api/admin/models', modelRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/mcp', mcpRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

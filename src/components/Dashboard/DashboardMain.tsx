@@ -1,37 +1,41 @@
 import React, { useState, useEffect } from 'react';
-import { User, UserGroup, AIModel, DashboardStats } from '../../types';
+import { User, UserGroup, AIModel, DashboardStats, McpServer } from '../../types';
 import { api } from '../../api';
 import { OverviewTab } from './OverviewTab';
 import { UserManagementTab } from './UserManagementTab';
 import { GroupManagementTab } from './GroupManagementTab';
 import { ModelManagementTab } from './ModelManagementTab';
+import { McpManagementTab } from './McpManagementTab';
 import { SystemEnvTab } from './SystemEnvTab';
 import { AuditLogsTab } from './AuditLogsTab';
-import { LayoutDashboard, Users, Shield, Cpu, FileCode, RefreshCw, ShieldCheck } from 'lucide-react';
+import { LayoutDashboard, Users, Shield, Cpu, FileCode, RefreshCw, ShieldCheck, Plug } from 'lucide-react';
 
 export const DashboardMain: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'groups' | 'models' | 'audit' | 'env'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'groups' | 'models' | 'mcp' | 'audit' | 'env'>('overview');
 
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<UserGroup[]>([]);
   const [models, setModels] = useState<AIModel[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadAllData = async () => {
     setLoading(true);
     try {
-      const [statsRes, usersRes, groupsRes, modelsRes] = await Promise.all([
+      const [statsRes, usersRes, groupsRes, modelsRes, mcpRes] = await Promise.all([
         api.getDashboardStats().catch(() => null),
         api.getUsers().then((r) => r.users).catch(() => []),
         api.getGroups().then((r) => r.groups).catch(() => []),
         api.getModels().then((r) => r.models).catch(() => []),
+        api.getMcpServers().then((r) => r.servers).catch(() => []),
       ]);
 
       if (statsRes) setStats(statsRes);
       setUsers(usersRes);
       setGroups(groupsRes);
       setModels(modelsRes);
+      setMcpServers(mcpRes);
     } catch (err) {
       console.error('[DashboardMain] Error loading data:', err);
     } finally {
@@ -89,6 +93,34 @@ export const DashboardMain: React.FC = () => {
   const handleDeleteModel = async (id: number) => {
     await api.deleteModel(id);
     await loadAllData();
+  };
+
+  // MCP Server CRUD handlers
+  const handleCreateMcpServer = async (data: Partial<McpServer>) => {
+    const res = await api.createMcpServer(data);
+    await loadAllData();
+    return res;
+  };
+
+  const handleUpdateMcpServer = async (id: number, data: Partial<McpServer>) => {
+    const res = await api.updateMcpServer(id, data);
+    await loadAllData();
+    return res;
+  };
+
+  const handleDeleteMcpServer = async (id: number) => {
+    await api.deleteMcpServer(id);
+    await loadAllData();
+  };
+
+  const handleTestMcpServer = async (id: number) => {
+    const res = await api.testMcpServer(id);
+    await loadAllData();
+    return res;
+  };
+
+  const handleCallMcpTool = async (id: number, data: { toolName: string; arguments?: Record<string, any> }) => {
+    return await api.callMcpTool(id, data);
   };
 
   return (
@@ -165,6 +197,18 @@ export const DashboardMain: React.FC = () => {
         </button>
 
         <button
+          onClick={() => setActiveTab('mcp')}
+          className={`flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
+            activeTab === 'mcp'
+              ? 'bg-indigo-600 text-white shadow-xs'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+          }`}
+        >
+          <Plug className="w-3.5 h-3.5 text-cyan-500" />
+          <span>Quản Lý MCP Servers ({mcpServers.length})</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('audit')}
           className={`flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
             activeTab === 'audit'
@@ -206,6 +250,7 @@ export const DashboardMain: React.FC = () => {
         <GroupManagementTab
           groups={groups}
           allModels={models}
+          allMcpServers={mcpServers}
           onCreateGroup={handleCreateGroup}
           onUpdateGroup={handleUpdateGroup}
           onDeleteGroup={handleDeleteGroup}
@@ -215,9 +260,22 @@ export const DashboardMain: React.FC = () => {
       {activeTab === 'models' && (
         <ModelManagementTab
           models={models}
+          mcpServers={mcpServers}
           onCreateModel={handleCreateModel}
           onUpdateModel={handleUpdateModel}
           onDeleteModel={handleDeleteModel}
+        />
+      )}
+
+      {activeTab === 'mcp' && (
+        <McpManagementTab
+          servers={mcpServers}
+          groups={groups}
+          onCreateServer={handleCreateMcpServer}
+          onUpdateServer={handleUpdateMcpServer}
+          onDeleteServer={handleDeleteMcpServer}
+          onTestServer={handleTestMcpServer}
+          onCallTool={handleCallMcpTool}
         />
       )}
 

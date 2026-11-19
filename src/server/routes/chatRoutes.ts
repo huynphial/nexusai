@@ -23,6 +23,7 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
       SELECT m.id, m.name, m.provider, m.model_identifier, m.system_prompt,
              m.timeout_seconds, m.enable_stream, m.enable_thinking,
              m.temperature, m.top_p, m.max_tokens, m.presence_penalty, m.frequency_penalty,
+             m.enable_mcp, m.mcp_server_ids,
              m.is_active,
              gma.rate_limit_period, gma.rate_limit_requests, gma.max_tokens_group, gma.max_tokens_per_user
       FROM ai_models m
@@ -33,12 +34,45 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
       [groupId]
     );
 
-    const group = await getOne(`SELECT default_model_id FROM user_groups WHERE id = ?`, [groupId]);
+    const group = await getOne(
+      `SELECT default_model_id, COALESCE(enable_mcp, 0) as enable_mcp FROM user_groups WHERE id = ?`,
+      [groupId]
+    );
     const defaultModelId = group?.default_model_id || null;
+    const groupAllowsMcp = Boolean(group?.enable_mcp);
+
+    const groupMcpServers = groupAllowsMcp
+      ? await query(
+          `SELECT ms.id, ms.name
+           FROM group_mcp_access gm
+           JOIN mcp_servers ms ON gm.mcp_server_id = ms.id
+           WHERE gm.group_id = ? AND ms.is_active = 1
+           ORDER BY ms.id ASC`,
+          [groupId]
+        )
+      : [];
 
     const modelsWithQuota = [];
     for (const m of models) {
       const quotaCheck = await checkRateLimitAndQuota(userId!, groupId, m.id);
+      let parsedMcpIds: number[] = [];
+      if (m.mcp_server_ids) {
+        try {
+          const arr = JSON.parse(m.mcp_server_ids);
+          if (Array.isArray(arr)) parsedMcpIds = arr;
+        } catch {
+          parsedMcpIds = [];
+        }
+      }
+
+      const modelAllowsMcp = m.enable_mcp !== 0 && m.enable_mcp !== false;
+      const effectiveMcpServers =
+        groupAllowsMcp && modelAllowsMcp
+          ? parsedMcpIds.length > 0
+            ? groupMcpServers.filter((s: any) => parsedMcpIds.includes(Number(s.id)))
+            : groupMcpServers
+          : [];
+
       modelsWithQuota.push({
         ...m,
         system_prompt: m.system_prompt || '',
@@ -50,6 +84,10 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
         max_tokens: m.max_tokens ?? 0,
         presence_penalty: m.presence_penalty ?? 0,
         frequency_penalty: m.frequency_penalty ?? 0,
+        enable_mcp: m.enable_mcp ?? 1,
+        mcp_server_ids: parsedMcpIds,
+        mcp_enabled_for_user: effectiveMcpServers.length > 0,
+        active_mcp_servers: effectiveMcpServers.map((s: any) => ({ id: Number(s.id), name: s.name })),
         is_default: m.id === defaultModelId,
         quota: quotaCheck.usage,
         allowed: quotaCheck.allowed,
@@ -274,6 +312,7 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       email: req.user?.email,
       id: req.user?.id,
       role: req.user?.role,
+      group_id: groupId,
     };
 
     const aiResult = await generateAIChatResponse(
@@ -429,6 +468,7 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
       email: req.user?.email,
       id: req.user?.id,
       role: req.user?.role,
+      group_id: groupId,
     };
 
     // Call AI provider

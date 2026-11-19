@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { UserGroup, AIModel, GroupModelAccess } from '../../types';
-import { Plus, Edit2, Trash2, Shield, Sliders, CheckSquare, Square, Zap, Clock, Star } from 'lucide-react';
+import { UserGroup, AIModel, GroupModelAccess, McpServer } from '../../types';
+import { Plus, Edit2, Trash2, Shield, Sliders, CheckSquare, Square, Zap, Star, Plug } from 'lucide-react';
 
 interface Props {
   groups: UserGroup[];
   allModels: AIModel[];
+  allMcpServers?: McpServer[];
   onCreateGroup: (data: any) => Promise<void>;
   onUpdateGroup: (id: number, data: any) => Promise<void>;
   onDeleteGroup: (id: number) => Promise<void>;
@@ -13,6 +14,7 @@ interface Props {
 export const GroupManagementTab: React.FC<Props> = ({
   groups,
   allModels,
+  allMcpServers = [],
   onCreateGroup,
   onUpdateGroup,
   onDeleteGroup,
@@ -24,6 +26,8 @@ export const GroupManagementTab: React.FC<Props> = ({
   const [description, setDescription] = useState('');
   const [defaultModelId, setDefaultModelId] = useState<number | null>(null);
   const [enableDebugThinking, setEnableDebugThinking] = useState(false);
+  const [enableMcp, setEnableMcp] = useState(false);
+  const [selectedMcpIds, setSelectedMcpIds] = useState<number[]>([]);
   // Access rules matrix mapping model_id -> rule
   const [accessRulesMap, setAccessRulesMap] = useState<Record<number, GroupModelAccess>>({});
   const [loading, setLoading] = useState(false);
@@ -34,6 +38,8 @@ export const GroupManagementTab: React.FC<Props> = ({
     setDescription('');
     setDefaultModelId(allModels[0]?.id || null);
     setEnableDebugThinking(false);
+    setEnableMcp(false);
+    setSelectedMcpIds([]);
     // Default matrix with all active models enabled
     const initialMap: Record<number, GroupModelAccess> = {};
     allModels.forEach((m) => {
@@ -56,6 +62,8 @@ export const GroupManagementTab: React.FC<Props> = ({
     setDescription(g.description || '');
     setDefaultModelId(g.default_model_id || null);
     setEnableDebugThinking(Boolean(g.enable_debug_thinking));
+    setEnableMcp(Boolean(g.enable_mcp));
+    setSelectedMcpIds(Array.isArray(g.mcp_server_ids) ? g.mcp_server_ids : []);
 
     const currentMap: Record<number, GroupModelAccess> = {};
     if (g.access_rules) {
@@ -65,6 +73,12 @@ export const GroupManagementTab: React.FC<Props> = ({
     }
     setAccessRulesMap(currentMap);
     setIsModalOpen(true);
+  };
+
+  const toggleMcpServer = (mcpId: number) => {
+    setSelectedMcpIds((prev) =>
+      prev.includes(mcpId) ? prev.filter((id) => id !== mcpId) : [...prev, mcpId]
+    );
   };
 
   const toggleModelSelection = (modelId: number) => {
@@ -113,6 +127,8 @@ export const GroupManagementTab: React.FC<Props> = ({
           description,
           default_model_id: defaultModelId,
           enable_debug_thinking: enableDebugThinking ? 1 : 0,
+          enable_mcp: enableMcp ? 1 : 0,
+          mcp_server_ids: selectedMcpIds,
           access_rules: rulesArray,
         });
       } else {
@@ -121,6 +137,8 @@ export const GroupManagementTab: React.FC<Props> = ({
           description,
           default_model_id: defaultModelId,
           enable_debug_thinking: enableDebugThinking ? 1 : 0,
+          enable_mcp: enableMcp ? 1 : 0,
+          mcp_server_ids: selectedMcpIds,
           access_rules: rulesArray,
         });
       }
@@ -230,6 +248,47 @@ export const GroupManagementTab: React.FC<Props> = ({
                   <span className="font-bold text-indigo-600 dark:text-indigo-400">
                     {g.default_model_name || allModels.find((m) => m.id === g.default_model_id)?.name || 'Chưa thiết lập'}
                   </span>
+                </div>
+
+                {/* MCP Permission Status Badge */}
+                <div className="mt-2 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300">
+                      <Plug className="w-3.5 h-3.5 text-cyan-500" />
+                      <span>Quyền MCP Tools:</span>
+                    </span>
+                    {g.enable_mcp ? (
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-bold text-[10px] border border-emerald-500/20">
+                        BẬT ({g.mcp_servers?.length || 0} MCP)
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-md bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400 font-bold text-[10px]">
+                        TẮT
+                      </span>
+                    )}
+                  </div>
+                  {Boolean(g.enable_mcp) && (
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {g.mcp_servers && g.mcp_servers.length > 0 ? (
+                        g.mcp_servers.map((srv) => (
+                          <span
+                            key={srv.id}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${
+                              srv.is_active
+                                ? 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/20'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-300 dark:border-slate-700 line-through'
+                            }`}
+                          >
+                            {srv.name}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 italic">
+                          Chưa chọn MCP Server nào cho nhóm này.
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <p className="text-xs text-slate-600 dark:text-slate-400 mt-2 line-clamp-2">
@@ -357,6 +416,105 @@ export const GroupManagementTab: React.FC<Props> = ({
                 >
                   {enableDebugThinking ? 'BẬT DEBUG' : 'TẮT DEBUG'}
                 </button>
+              </div>
+
+              {/* MCP Group Permission Toggle & Server Selector */}
+              <div className="p-3 rounded-xl bg-cyan-50/60 dark:bg-cyan-950/20 border border-cyan-200/80 dark:border-cyan-900/50 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-bold text-xs text-cyan-900 dark:text-cyan-200 flex items-center gap-1.5">
+                      <Plug className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
+                      <span>Quyền sử dụng MCP Tools (Model Context Protocol)</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-tight">
+                      Chỉ những nhóm được bật MCP và được cấp quyền MCP Server tương ứng mới có thể sử dụng công cụ MCP khi chat.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEnableMcp(!enableMcp)}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs transition-all border shrink-0 cursor-pointer ${
+                      enableMcp
+                        ? 'bg-cyan-600 text-white border-cyan-600 shadow-xs'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    {enableMcp ? 'BẬT MCP' : 'TẮT MCP'}
+                  </button>
+                </div>
+
+                {enableMcp && (
+                  <div className="pt-2.5 border-t border-cyan-200/60 dark:border-cyan-900/40 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                        Chọn các MCP Server nhóm được phép sử dụng:
+                      </span>
+                      {allMcpServers.length > 0 && (
+                        <div className="flex items-center gap-2 text-[10px]">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedMcpIds(allMcpServers.map((s) => s.id))}
+                            className="text-cyan-600 dark:text-cyan-400 hover:underline font-semibold cursor-pointer"
+                          >
+                            Chọn tất cả
+                          </button>
+                          <span className="text-slate-300">|</span>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedMcpIds([])}
+                            className="text-slate-500 hover:underline font-medium cursor-pointer"
+                          >
+                            Bỏ chọn
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {allMcpServers.length === 0 ? (
+                      <div className="text-[11px] text-amber-600 dark:text-amber-400 italic">
+                        Chưa có MCP Server nào được khai báo. Vui lòng thêm ở tab &quot;Quản Lý MCP Servers&quot;.
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-36 overflow-y-auto">
+                        {allMcpServers.map((srv) => {
+                          const checked = selectedMcpIds.includes(srv.id);
+                          return (
+                            <label
+                              key={srv.id}
+                              className={`flex items-center justify-between gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${
+                                checked
+                                  ? 'bg-white dark:bg-slate-900 border-cyan-500/60 shadow-2xs'
+                                  : 'bg-white/60 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 opacity-75'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleMcpServer(srv.id)}
+                                  className="rounded text-cyan-600 focus:ring-cyan-500"
+                                />
+                                <div className="min-w-0">
+                                  <div className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                                    {srv.name}
+                                  </div>
+                                  <div className="text-[10px] text-slate-400 font-mono">
+                                    {srv.transport} · {srv.tools_count || 0} tools
+                                  </div>
+                                </div>
+                              </div>
+                              {!srv.is_active && (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-slate-500 shrink-0">
+                                  Đang tắt
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Rate Limit Matrix Section */}

@@ -25,10 +25,28 @@ router.get('/', async (req: CustomRequest, res: Response) => {
       JOIN ai_models m ON gma.model_id = m.id
     `);
 
-    const result = groups.map((g: any) => ({
-      ...g,
-      access_rules: accessRules.filter((r: any) => r.group_id === g.id)
-    }));
+    const mcpAccessRows = await query(`
+      SELECT gm.group_id, gm.mcp_server_id, ms.name, ms.transport, ms.is_active
+      FROM group_mcp_access gm
+      JOIN mcp_servers ms ON gm.mcp_server_id = ms.id
+      ORDER BY ms.id ASC
+    `);
+
+    const result = groups.map((g: any) => {
+      const groupMcps = mcpAccessRows.filter((r: any) => r.group_id === g.id);
+      return {
+        ...g,
+        enable_mcp: g.enable_mcp ? 1 : 0,
+        access_rules: accessRules.filter((r: any) => r.group_id === g.id),
+        mcp_server_ids: groupMcps.map((r: any) => Number(r.mcp_server_id)),
+        mcp_servers: groupMcps.map((r: any) => ({
+          id: Number(r.mcp_server_id),
+          name: r.name,
+          transport: r.transport,
+          is_active: r.is_active,
+        })),
+      };
+    });
 
     res.json({ groups: result });
   } catch (err: any) {
@@ -41,7 +59,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
   try {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
-    const { name, description, default_model_id, enable_debug_thinking, access_rules } = req.body;
+    const { name, description, default_model_id, enable_debug_thinking, enable_mcp, mcp_server_ids, access_rules } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Tên nhóm người dùng không được để trống.' });
@@ -53,12 +71,13 @@ router.post('/', async (req: CustomRequest, res: Response) => {
     }
 
     const resGroup = await run(
-      `INSERT INTO user_groups (name, description, default_model_id, enable_debug_thinking) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO user_groups (name, description, default_model_id, enable_debug_thinking, enable_mcp) VALUES (?, ?, ?, ?, ?)`,
       [
         name.trim(),
         description ? description.trim() : '',
         default_model_id ? Number(default_model_id) : null,
-        enable_debug_thinking ? 1 : 0
+        enable_debug_thinking ? 1 : 0,
+        enable_mcp ? 1 : 0
       ]
     );
 
@@ -86,7 +105,17 @@ router.post('/', async (req: CustomRequest, res: Response) => {
       }
     }
 
-    await logger.audit(adminId, adminEmail, 'ADMIN_CREATE_GROUP', `Tạo nhóm người dùng mới "${name}" (#${groupId})`, req.ip);
+    if (Array.isArray(mcp_server_ids)) {
+      const uniqueIds = Array.from(new Set(mcp_server_ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)));
+      for (const mcpId of uniqueIds) {
+        await run(
+          `INSERT OR IGNORE INTO group_mcp_access (group_id, mcp_server_id) VALUES (?, ?)`,
+          [groupId, mcpId]
+        );
+      }
+    }
+
+    await logger.audit(adminId, adminEmail, 'ADMIN_CREATE_GROUP', `Tạo nhóm người dùng mới "${name}" (#${groupId}, MCP: ${enable_mcp ? 'BẬT' : 'TẮT'})`, req.ip);
 
     res.status(201).json({ message: 'Tạo nhóm thành công.', groupId });
   } catch (err: any) {
@@ -100,7 +129,7 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
     const adminId = req.user?.id!;
     const adminEmail = req.user?.email!;
     const groupId = parseInt(req.params.id, 10);
-    const { name, description, default_model_id, enable_debug_thinking, access_rules } = req.body;
+    const { name, description, default_model_id, enable_debug_thinking, enable_mcp, mcp_server_ids, access_rules } = req.body;
 
     const group = await getOne(`SELECT * FROM user_groups WHERE id = ?`, [groupId]);
     if (!group) {
@@ -115,11 +144,16 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       ? (enable_debug_thinking ? 1 : 0)
       : (group.enable_debug_thinking || 0);
 
-    await run(`UPDATE user_groups SET name = ?, description = ?, default_model_id = ?, enable_debug_thinking = ? WHERE id = ?`, [
+    const updatedEnableMcp = enable_mcp !== undefined
+      ? (enable_mcp ? 1 : 0)
+      : (group.enable_mcp || 0);
+
+    await run(`UPDATE user_groups SET name = ?, description = ?, default_model_id = ?, enable_debug_thinking = ?, enable_mcp = ? WHERE id = ?`, [
       name ? name.trim() : group.name,
       description !== undefined ? description.trim() : group.description,
       updatedDefaultModelId,
       updatedDebugThinking,
+      updatedEnableMcp,
       groupId
     ]);
 
@@ -147,9 +181,26 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       }
     }
 
-    await logger.audit(adminId, adminEmail, 'ADMIN_UPDATE_GROUP', `Cập nhật nhóm & ma trận Rate Limit cho nhóm #${groupId} (${name || group.name})`, req.ip);
+    if (Array.isArray(mcp_server_ids)) {
+      await run(`DELETE FROM group_mcp_access WHERE group_id = ?`, [groupId]);
+      const uniqueIds = Array.from(new Set(mcp_server_ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)));
+      for (const mcpId of uniqueIds) {
+        await run(
+          `INSERT OR IGNORE INTO group_mcp_access (group_id, mcp_server_id) VALUES (?, ?)`,
+          [groupId, mcpId]
+        );
+      }
+    }
 
-    res.json({ message: 'Cập nhật nhóm và cấu hình phân quyền mô hình thành công.' });
+    await logger.audit(
+      adminId,
+      adminEmail,
+      'ADMIN_UPDATE_GROUP',
+      `Cập nhật nhóm & phân quyền cho nhóm #${groupId} (${name || group.name}) [MCP: ${updatedEnableMcp ? 'BẬT' : 'TẮT'}]`,
+      req.ip
+    );
+
+    res.json({ message: 'Cập nhật nhóm và cấu hình phân quyền thành công.' });
   } catch (err: any) {
     res.status(500).json({ error: 'Lỗi khi cập nhật nhóm người dùng.' });
   }
@@ -173,6 +224,7 @@ router.delete('/:id', async (req: CustomRequest, res: Response) => {
 
     await run(`DELETE FROM user_groups WHERE id = ?`, [groupId]);
     await run(`DELETE FROM group_model_access WHERE group_id = ?`, [groupId]);
+    await run(`DELETE FROM group_mcp_access WHERE group_id = ?`, [groupId]);
 
     await logger.audit(adminId, adminEmail, 'ADMIN_DELETE_GROUP', `Xóa nhóm #${groupId} (${group?.name || 'N/A'})`, req.ip);
 

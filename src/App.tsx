@@ -83,6 +83,16 @@ function MainContent() {
     loadChatData();
   }, [user]);
 
+  useEffect(() => {
+    if (user && activeView === 'chat') {
+      api.getAvailableModels()
+        .then((res) => {
+          if (res?.models) setAvailableModels(res.models);
+        })
+        .catch(() => {});
+    }
+  }, [activeView, user]);
+
   // Load messages when activeSessionId changes
   useEffect(() => {
     if (!activeSessionId || !user) {
