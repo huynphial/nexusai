@@ -32,6 +32,8 @@ export interface McpToolBinding {
   serverId: number;
   serverName: string;
   description: string;
+  rawDescription: string;
+  transport: 'streamable_http' | 'sse' | 'stdio';
   inputSchema: Record<string, any>;
 }
 
@@ -89,7 +91,11 @@ async function parseHttpMcpResponse(response: Response, targetId?: number | stri
 // 1. Streamable HTTP MCP Transport (POST JSON-RPC 2.0)
 async function executeStreamableHttpMcp<T>(
   server: McpServerRecord,
-  action: (rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>) => Promise<T>
+  action: (
+    rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>,
+    getStatusCode: () => number
+  ) => Promise<T>,
+  externalSignal?: AbortSignal
 ): Promise<T> {
   const url = (server.url || '').trim();
   if (!url) throw new Error('Chưa cấu hình URL cho MCP server.');
@@ -98,8 +104,13 @@ async function executeStreamableHttpMcp<T>(
   const timeoutMs = (server.timeout_seconds && server.timeout_seconds > 0 ? server.timeout_seconds : 30) * 1000;
   let sessionId: string | null = null;
   let nextId = 1;
+  let lastStatusCode = 200;
 
   const rpc = async (method: string, params?: any, isNotification = false): Promise<any> => {
+    if (externalSignal?.aborted) {
+      throw new Error('CLIENT_ABORTED');
+    }
+
     const reqId = isNotification ? undefined : nextId++;
     const payload: any = {
       jsonrpc: '2.0',
@@ -119,6 +130,8 @@ async function executeStreamableHttpMcp<T>(
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(new Error(`MCP timeout (${timeoutMs}ms)`)), timeoutMs);
+    const onExtAbort = () => ctrl.abort(externalSignal?.reason || new Error('CLIENT_ABORTED'));
+    externalSignal?.addEventListener('abort', onExtAbort, { once: true });
 
     try {
       const res = await fetch(url, {
@@ -127,6 +140,8 @@ async function executeStreamableHttpMcp<T>(
         body: JSON.stringify(payload),
         signal: ctrl.signal,
       });
+
+      lastStatusCode = res.status;
 
       const returnedSession = res.headers.get('mcp-session-id') || res.headers.get('Mcp-Session-Id');
       if (returnedSession) {
@@ -153,6 +168,7 @@ async function executeStreamableHttpMcp<T>(
       return data?.result;
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', onExtAbort);
     }
   };
 
@@ -165,26 +181,34 @@ async function executeStreamableHttpMcp<T>(
 
   await rpc('notifications/initialized', undefined, true).catch(() => null);
 
-  return await action(rpc);
+  return await action(rpc, () => lastStatusCode);
 }
 
 // 2. Legacy HTTP+SSE MCP Transport (GET /sse -> endpoint event + POST messages)
 async function executeSseMcp<T>(
   server: McpServerRecord,
-  action: (rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>) => Promise<T>
+  action: (
+    rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>,
+    getStatusCode: () => number
+  ) => Promise<T>,
+  externalSignal?: AbortSignal
 ): Promise<T> {
   const sseUrl = (server.url || '').trim();
   if (!sseUrl) throw new Error('Chưa cấu hình SSE URL cho MCP server.');
+  if (externalSignal?.aborted) throw new Error('CLIENT_ABORTED');
 
   const customHeaders = safeParseJson<Record<string, string>>(server.headers_json, {});
   const timeoutMs = (server.timeout_seconds && server.timeout_seconds > 0 ? server.timeout_seconds : 30) * 1000;
 
   const ctrl = new AbortController();
   const globalTimer = setTimeout(() => ctrl.abort(new Error(`MCP SSE timeout (${timeoutMs}ms)`)), timeoutMs);
+  const onExtAbort = () => ctrl.abort(externalSignal?.reason || new Error('CLIENT_ABORTED'));
+  externalSignal?.addEventListener('abort', onExtAbort, { once: true });
 
   let postEndpoint = '';
   const pendingResolvers = new Map<number | string, { resolve: (val: any) => void; reject: (err: any) => void }>();
   let nextId = 1;
+  let lastStatusCode = 200;
 
   try {
     const res = await fetch(sseUrl, {
@@ -304,6 +328,8 @@ async function executeSseMcp<T>(
         signal: ctrl.signal,
       });
 
+      lastStatusCode = postRes.status;
+
       if (!postRes.ok && !isNotification) {
         if (reqId !== undefined) pendingResolvers.delete(reqId);
         const errText = await postRes.text().catch(() => '');
@@ -321,7 +347,10 @@ async function executeSseMcp<T>(
         }
       }
 
-      return await waitPromise;
+      const sseResult = await waitPromise;
+      // Normalize 202 Accepted on SSE POST as 200 OK once RPC result completes cleanly
+      if (lastStatusCode === 202) lastStatusCode = 200;
+      return sseResult;
     };
 
     await rpc('initialize', {
@@ -331,9 +360,10 @@ async function executeSseMcp<T>(
     });
     await rpc('notifications/initialized', undefined, true).catch(() => null);
 
-    return await action(rpc);
+    return await action(rpc, () => lastStatusCode);
   } finally {
     clearTimeout(globalTimer);
+    externalSignal?.removeEventListener('abort', onExtAbort);
     ctrl.abort();
   }
 }
@@ -341,10 +371,15 @@ async function executeSseMcp<T>(
 // 3. Stdio Local Process MCP Transport (spawn command + JSON-RPC over stdin/stdout)
 async function executeStdioMcp<T>(
   server: McpServerRecord,
-  action: (rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>) => Promise<T>
+  action: (
+    rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>,
+    getStatusCode: () => number
+  ) => Promise<T>,
+  externalSignal?: AbortSignal
 ): Promise<T> {
   const command = (server.command || '').trim();
   if (!command) throw new Error('Chưa cấu hình Command cho MCP server (stdio).');
+  if (externalSignal?.aborted) throw new Error('CLIENT_ABORTED');
 
   const args = safeParseJson<string[]>(server.args_json, []);
   const customEnv = safeParseJson<Record<string, string>>(server.env_json, {});
@@ -358,6 +393,19 @@ async function executeStdioMcp<T>(
   const pendingResolvers = new Map<number | string, { resolve: (val: any) => void; reject: (err: any) => void }>();
   let nextId = 1;
   let stderrLog = '';
+
+  const onExtAbort = () => {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // ignore
+    }
+    for (const [, p] of pendingResolvers) {
+      p.reject(new Error('CLIENT_ABORTED'));
+    }
+    pendingResolvers.clear();
+  };
+  externalSignal?.addEventListener('abort', onExtAbort, { once: true });
 
   const timer = setTimeout(() => {
     try {
@@ -441,9 +489,10 @@ async function executeStdioMcp<T>(
     });
     await rpc('notifications/initialized', undefined, true);
 
-    return await action(rpc);
+    return await action(rpc, () => 200);
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExtAbort);
     try {
       child.kill('SIGTERM');
     } catch {
@@ -454,15 +503,19 @@ async function executeStdioMcp<T>(
 
 async function withMcpClient<T>(
   server: McpServerRecord,
-  action: (rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>) => Promise<T>
+  action: (
+    rpc: (method: string, params?: any, isNotification?: boolean) => Promise<any>,
+    getStatusCode: () => number
+  ) => Promise<T>,
+  externalSignal?: AbortSignal
 ): Promise<T> {
   if (server.transport === 'sse') {
-    return executeSseMcp(server, action);
+    return executeSseMcp(server, action, externalSignal);
   }
   if (server.transport === 'stdio') {
-    return executeStdioMcp(server, action);
+    return executeStdioMcp(server, action, externalSignal);
   }
-  return executeStreamableHttpMcp(server, action);
+  return executeStreamableHttpMcp(server, action, externalSignal);
 }
 
 // Discover & list tools from a single MCP server
@@ -522,20 +575,41 @@ export async function testAndSyncMcpServer(serverId: number): Promise<{
 export async function callMcpTool(
   serverId: number,
   toolName: string,
-  args: Record<string, any> = {}
-): Promise<{ text: string; isError: boolean; raw: any }> {
+  args: Record<string, any> = {},
+  externalSignal?: AbortSignal
+): Promise<{
+  text: string;
+  isError: boolean;
+  raw: any;
+  statusCode: number;
+  transport: string;
+  latencyMs: number;
+}> {
+  const t0 = Date.now();
   const server = (await getOne(`SELECT * FROM mcp_servers WHERE id = ?`, [serverId])) as McpServerRecord | null;
   if (!server) {
-    return { text: `Lỗi: MCP server #${serverId} không tồn tại.`, isError: true, raw: null };
+    return {
+      text: `Lỗi: MCP server #${serverId} không tồn tại.`,
+      isError: true,
+      raw: null,
+      statusCode: 404,
+      transport: 'unknown',
+      latencyMs: Date.now() - t0,
+    };
   }
 
   try {
-    const result = await withMcpClient(server, async (rpc) => {
-      return await rpc('tools/call', {
-        name: toolName,
-        arguments: args || {},
-      });
-    });
+    const { result, statusCode } = await withMcpClient(
+      server,
+      async (rpc, getStatusCode) => {
+        const res = await rpc('tools/call', {
+          name: toolName,
+          arguments: args || {},
+        });
+        return { result: res, statusCode: getStatusCode() };
+      },
+      externalSignal
+    );
 
     const contentArr = Array.isArray(result?.content) ? result.content : [];
     const textParts = contentArr.map((item: any) => {
@@ -546,17 +620,29 @@ export async function callMcpTool(
     });
 
     const formattedText = textParts.length > 0 ? textParts.join('\n') : JSON.stringify(result ?? {});
+    const isErr = Boolean(result?.isError);
     return {
       text: formattedText,
-      isError: Boolean(result?.isError),
+      isError: isErr,
       raw: result,
+      statusCode: statusCode || (isErr ? 500 : 200),
+      transport: server.transport,
+      latencyMs: Date.now() - t0,
     };
   } catch (err: any) {
+    if (err.message === 'CLIENT_ABORTED' || externalSignal?.aborted) {
+      throw err;
+    }
+    const httpMatch = /^HTTP\s+(\d{3})/i.exec(err.message || '');
+    const parsedStatus = httpMatch ? parseInt(httpMatch[1], 10) : 500;
     logger.error('MCPClient', `Tool call "${toolName}" on MCP #${serverId} failed: ${err.message}`, err);
     return {
       text: `Lỗi khi thực thi công cụ MCP "${toolName}": ${err.message}`,
       isError: true,
       raw: null,
+      statusCode: parsedStatus,
+      transport: server.transport,
+      latencyMs: Date.now() - t0,
     };
   }
 }
@@ -643,6 +729,8 @@ export async function getMcpToolBindingsForModel(
         serverId: srv.id,
         serverName: srv.name,
         description: tool.description ? `[${srv.name}] ${tool.description}` : `[${srv.name}] Công cụ ${tool.name}`,
+        rawDescription: tool.description || '',
+        transport: srv.transport || 'streamable_http',
         inputSchema:
           tool.inputSchema && typeof tool.inputSchema === 'object'
             ? tool.inputSchema

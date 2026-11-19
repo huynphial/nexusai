@@ -77,7 +77,8 @@ export async function generateAIChatResponse(
   messages: ChatMessageItem[],
   onChunk?: (chunk: StreamChunk) => void,
   userInfo?: UserInfoTracing,
-  sessionId?: number | string
+  sessionId?: number | string,
+  externalSignal?: AbortSignal
 ): Promise<AIResponse> {
   const systemPrompt = modelConfig.system_prompt || 'Bạn là trợ lý trí tuệ nhân tạo Local AI, hỗ trợ người dùng chu đáo bằng Tiếng Việt.';
   const timeoutSeconds = modelConfig.timeout_seconds && modelConfig.timeout_seconds > 0 ? modelConfig.timeout_seconds : 60;
@@ -88,11 +89,22 @@ export async function generateAIChatResponse(
 
   logger.debug('AIProvider', `Initiating call to "${modelConfig.name}" (${modelConfig.provider}:${modelConfig.model_identifier}) | Timeout: ${timeoutSeconds}s | Stream: ${!!isStreamWanted} | Thinking: ${allowThinking}`);
 
-  // Setup AbortController for timeout management
+  // Setup AbortController combining max timeout AND client cancellation signal
   const abortController = new AbortController();
   const timer = setTimeout(() => {
     abortController.abort(new Error(`Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`));
   }, timeoutSeconds * 1000);
+
+  const onExternalAbort = () => {
+    abortController.abort(externalSignal?.reason || new Error('CLIENT_ABORTED'));
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      onExternalAbort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
 
   const isMcpEnabled = modelConfig.enable_mcp !== 0 && modelConfig.enable_mcp !== false;
   let parsedMcpServerIds: number[] = [];
@@ -158,6 +170,7 @@ export async function generateAIChatResponse(
         systemInstruction: systemPrompt,
         temperature: modelTemp,
         topP: modelTopP,
+        abortSignal: abortController.signal,
       };
       if (modelMaxTokens) {
         geminiConfig.maxOutputTokens = modelMaxTokens;
@@ -176,6 +189,10 @@ export async function generateAIChatResponse(
 
       const MAX_TOOL_TURNS = 6;
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        if (abortController.signal.aborted) {
+          throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+        }
+
         let turnFunctionCalls: Array<{ name: string; args: Record<string, any> }> = [];
 
         if (isStreamWanted) {
@@ -188,7 +205,7 @@ export async function generateAIChatResponse(
           let inThinkingMode = false;
           for await (const chunk of streamResult) {
             if (abortController.signal.aborted) {
-              throw new Error(`Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+              throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
             }
             if (Array.isArray(chunk.functionCalls) && chunk.functionCalls.length > 0) {
               for (const fc of chunk.functionCalls) {
@@ -249,29 +266,49 @@ export async function generateAIChatResponse(
 
         const responseParts: any[] = [];
         for (let i = 0; i < turnFunctionCalls.length; i++) {
+          if (abortController.signal.aborted) {
+            throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+          }
           const fc = turnFunctionCalls[i];
           const binding = mcpBindings.find((b) => b.qualifiedName === fc.name || b.originalName === fc.name);
           const stepId = `mcp_${turn}_${i}_${Date.now()}`;
           const stepStart = Date.now() - startTime;
-          const displayToolName = binding ? `${binding.serverName} / ${binding.originalName}` : fc.name;
+          const toolName = binding?.originalName || fc.name;
+          const serverName = binding?.serverName || 'MCP';
+          const toolDesc = binding?.rawDescription || '';
 
           const runningStep = {
             id: stepId,
-            title: `Gọi công cụ MCP: ${displayToolName}`,
+            title: `Gọi công cụ MCP: ${toolName}`,
             phase: 'tool',
             status: 'running',
             start_ms: stepStart,
             end_ms: null,
             duration_ms: null,
-            detail: `Tham số: ${JSON.stringify(fc.args)}`,
+            detail: toolDesc || undefined,
+            meta: {
+              kind: 'mcp_tool',
+              tool_name: toolName,
+              server_name: serverName,
+              tool_description: toolDesc,
+              transport: binding?.transport || '',
+              arg_keys: Object.keys(fc.args || {}),
+            },
           };
           geminiSteps.push(runningStep);
           if (onChunk) onChunk({ type: 'progress', step: runningStep });
 
           const t0 = Date.now();
           const toolResult = binding
-            ? await callMcpTool(binding.serverId, binding.originalName, fc.args)
-            : { text: `Không tìm thấy công cụ MCP "${fc.name}".`, isError: true, raw: null };
+            ? await callMcpTool(binding.serverId, binding.originalName, fc.args, abortController.signal)
+            : {
+                text: `Không tìm thấy công cụ MCP "${fc.name}".`,
+                isError: true,
+                raw: null,
+                statusCode: 404,
+                transport: 'unknown',
+                latencyMs: 0,
+              };
           const toolMs = Date.now() - t0;
 
           const doneStep = {
@@ -279,7 +316,17 @@ export async function generateAIChatResponse(
             status: toolResult.isError ? 'error' : 'done',
             end_ms: Date.now() - startTime,
             duration_ms: toolMs,
-            detail: toolResult.text.slice(0, 300),
+            detail: toolDesc || undefined,
+            meta: {
+              kind: 'mcp_tool',
+              tool_name: toolName,
+              server_name: serverName,
+              tool_description: toolDesc,
+              transport: toolResult.transport || binding?.transport || '',
+              status_code: toolResult.statusCode,
+              arg_keys: Object.keys(fc.args || {}),
+              ok: !toolResult.isError,
+            },
           };
           const sIdx = geminiSteps.findIndex((s) => s.id === stepId);
           if (sIdx >= 0) geminiSteps[sIdx] = doneStep;
@@ -359,7 +406,8 @@ export async function generateAIChatResponse(
             allowThinking,
             Boolean(isStreamWanted),
             startTime,
-            onChunk
+            onChunk,
+            abortController.signal
           );
         }
       }
@@ -438,6 +486,9 @@ export async function generateAIChatResponse(
       const MAX_TOOL_TURNS = 6;
 
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        if (abortController.signal.aborted) {
+          throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+        }
         const requestPayload: any = {
           model: modelId,
           messages: conversationMessages,
@@ -515,6 +566,9 @@ export async function generateAIChatResponse(
             signal: abortController.signal,
           });
         } catch (fetchErr: any) {
+          if (externalSignal?.aborted || abortController.signal.aborted) {
+            throw fetchErr;
+          }
           if (isStepProgress && turn === 0) {
             logger.info('AIProvider', `Local step_progress endpoint unreachable (${fetchErr.message}). Switching to realistic simulated execution.`);
             clearTimeout(timer);
@@ -524,7 +578,8 @@ export async function generateAIChatResponse(
               allowThinking,
               Boolean(isStreamWanted),
               startTime,
-              onChunk
+              onChunk,
+              abortController.signal
             );
           }
           throw fetchErr;
@@ -548,7 +603,8 @@ export async function generateAIChatResponse(
               allowThinking,
               Boolean(isStreamWanted),
               startTime,
-              onChunk
+              onChunk,
+              abortController.signal
             );
           }
           throw new Error(`HTTP ${response.status}: ${errText}`);
@@ -762,17 +818,29 @@ export async function generateAIChatResponse(
             }
           };
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+          const onAbortReader = () => {
+            reader.cancel().catch(() => {});
+          };
+          abortController.signal.addEventListener('abort', onAbortReader, { once: true });
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
+          try {
+            while (true) {
+              if (abortController.signal.aborted) {
+                throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+              }
+              const { done, value } = await reader.read();
+              if (done) break;
 
-            for (const line of lines) {
-              processStreamLine(line);
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+
+              for (const line of lines) {
+                processStreamLine(line);
+              }
             }
+          } finally {
+            abortController.signal.removeEventListener('abort', onAbortReader);
           }
 
           if (buffer.trim()) {
@@ -896,28 +964,48 @@ export async function generateAIChatResponse(
 
         // Execute each MCP tool call and feed tool results back
         for (let i = 0; i < parsedCalls.length; i++) {
+          if (abortController.signal.aborted) {
+            throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+          }
           const tc = parsedCalls[i];
           const binding = mcpBindings.find((b) => b.qualifiedName === tc.name || b.originalName === tc.name);
           const stepId = `mcp_${turn}_${i}_${Date.now()}`;
-          const displayToolName = binding ? `${binding.serverName} / ${binding.originalName}` : tc.name;
+          const toolName = binding?.originalName || tc.name;
+          const serverName = binding?.serverName || 'MCP';
+          const toolDesc = binding?.rawDescription || '';
 
           const runningStep = {
             id: stepId,
-            title: `Gọi công cụ MCP: ${displayToolName}`,
+            title: `Gọi công cụ MCP: ${toolName}`,
             phase: 'tool',
             status: 'running',
             start_ms: Date.now() - startTime,
             end_ms: null,
             duration_ms: null,
-            detail: `Tham số: ${JSON.stringify(tc.parsedArgs)}`,
+            detail: toolDesc || undefined,
+            meta: {
+              kind: 'mcp_tool',
+              tool_name: toolName,
+              server_name: serverName,
+              tool_description: toolDesc,
+              transport: binding?.transport || '',
+              arg_keys: Object.keys(tc.parsedArgs || {}),
+            },
           };
           accumulatedSteps.push(runningStep);
           if (onChunk) onChunk({ type: 'progress', step: runningStep });
 
           const t0 = Date.now();
           const toolResult = binding
-            ? await callMcpTool(binding.serverId, binding.originalName, tc.parsedArgs)
-            : { text: `Không tìm thấy công cụ MCP "${tc.name}".`, isError: true, raw: null };
+            ? await callMcpTool(binding.serverId, binding.originalName, tc.parsedArgs, abortController.signal)
+            : {
+                text: `Không tìm thấy công cụ MCP "${tc.name}".`,
+                isError: true,
+                raw: null,
+                statusCode: 404,
+                transport: 'unknown',
+                latencyMs: 0,
+              };
           const toolMs = Date.now() - t0;
 
           const doneStep = {
@@ -925,7 +1013,17 @@ export async function generateAIChatResponse(
             status: toolResult.isError ? 'error' : 'done',
             end_ms: Date.now() - startTime,
             duration_ms: toolMs,
-            detail: toolResult.text.slice(0, 300),
+            detail: toolDesc || undefined,
+            meta: {
+              kind: 'mcp_tool',
+              tool_name: toolName,
+              server_name: serverName,
+              tool_description: toolDesc,
+              transport: toolResult.transport || binding?.transport || '',
+              status_code: toolResult.statusCode,
+              arg_keys: Object.keys(tc.parsedArgs || {}),
+              ok: !toolResult.isError,
+            },
           };
           const idx = accumulatedSteps.findIndex((s) => s.id === stepId);
           if (idx >= 0) accumulatedSteps[idx] = doneStep;
@@ -971,6 +1069,20 @@ export async function generateAIChatResponse(
     clearTimeout(timer);
     const latencyMs = Date.now() - startTime;
 
+    const isClientCancelled =
+      Boolean(externalSignal?.aborted) ||
+      err.message === 'CLIENT_ABORTED';
+
+    if (isClientCancelled) {
+      logger.info('AIProvider', `Request aborted by user client for model "${modelConfig.name}" (${latencyMs}ms). Upstream stream stopped.`);
+      return {
+        content: '',
+        tokensUsed: 0,
+        latency_ms: latencyMs,
+        tokens_per_second: 0,
+      };
+    }
+
     const isTimeout =
       err.name === 'AbortError' ||
       err.message?.toLowerCase().includes('timeout') ||
@@ -1013,6 +1125,11 @@ export async function generateAIChatResponse(
       latency_ms: latencyMs,
       tokens_per_second: 0,
     };
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 
@@ -1023,17 +1140,31 @@ async function simulateStepProgress(
   allowThinking: boolean,
   isStreamWanted: boolean,
   startTime: number,
-  onChunk?: (chunk: StreamChunk) => void
+  onChunk?: (chunk: StreamChunk) => void,
+  abortSignal?: AbortSignal
 ): Promise<AIResponse> {
   const steps: any[] = [];
   const addOrUpdateStep = (step: any) => {
+    if (abortSignal?.aborted) return;
     const idx = steps.findIndex((s) => s.id === step.id);
     if (idx >= 0) steps[idx] = { ...steps[idx], ...step };
     else steps.push(step);
     if (onChunk) onChunk({ type: 'progress', step });
   };
 
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve, reject) => {
+      if (abortSignal?.aborted) return reject(new Error('CLIENT_ABORTED'));
+      const t = setTimeout(() => {
+        abortSignal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(t);
+        reject(new Error('CLIENT_ABORTED'));
+      };
+      abortSignal?.addEventListener('abort', onAbort, { once: true });
+    });
   const userQuery = messages[messages.length - 1]?.content || 'Dữ liệu tổng quan';
 
   // Step 1: route

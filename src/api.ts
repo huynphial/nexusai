@@ -172,37 +172,57 @@ export const api = {
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const onSignalAbort = () => {
+        reader.cancel().catch(() => {});
+      };
+      if (signal) {
+        if (signal.aborted) {
+          onSignalAbort();
+          return;
+        }
+        signal.addEventListener('abort', onSignalAbort, { once: true });
+      }
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+      try {
+        while (true) {
+          if (signal?.aborted) break;
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data: ')) continue;
-          try {
-            const parsed = JSON.parse(trimmed.substring(6));
-            if (
-              parsed.type === 'thinking' ||
-              parsed.type === 'content' ||
-              parsed.type === 'progress' ||
-              parsed.type === 'choices'
-            ) {
-              callbacks.onChunk(parsed);
-            } else if (parsed.type === 'done') {
-              callbacks.onDone(parsed);
-            } else if (parsed.type === 'error') {
-              callbacks.onError(parsed.error);
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+            try {
+              const parsed = JSON.parse(trimmed.substring(6));
+              if (
+                parsed.type === 'thinking' ||
+                parsed.type === 'content' ||
+                parsed.type === 'progress' ||
+                parsed.type === 'choices'
+              ) {
+                callbacks.onChunk(parsed);
+              } else if (parsed.type === 'done') {
+                callbacks.onDone(parsed);
+              } else if (parsed.type === 'error') {
+                callbacks.onError(parsed.error);
+              }
+            } catch (e) {
+              // ignore partial json
             }
-          } catch (e) {
-            // ignore partial json
           }
         }
+      } finally {
+        signal?.removeEventListener('abort', onSignalAbort);
       }
     } catch (err: any) {
+      if (signal?.aborted || err?.name === 'AbortError') {
+        callbacks.onError('abort');
+        return;
+      }
       callbacks.onError(err.message || 'Lỗi kết nối stream.');
     }
   },

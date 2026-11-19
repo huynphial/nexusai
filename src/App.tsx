@@ -233,7 +233,7 @@ function MainContent() {
 
     setSendingMessage(true);
     setChatError(null);
-    setStreamingData({ content: '', thinking: '', isThinking: true });
+    setStreamingData({ content: '', thinking: '', isThinking: false });
 
     // Optimistic user message append
     const tempUserMsg: ChatMessage = {
@@ -298,7 +298,7 @@ function MainContent() {
             setStreamingData((prev) => ({
               content: accumulatedContent,
               thinking: accumulatedThinking,
-              isThinking: true,
+              isThinking: accumulatedThinking.length > 0,
               progress_steps: prev?.progress_steps,
               progress_summary: prev?.progress_summary,
               x_choices: prev?.x_choices,

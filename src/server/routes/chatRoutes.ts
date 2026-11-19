@@ -285,6 +285,17 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
     'X-Accel-Buffering': 'no',
   });
 
+  // Track client disconnection / cancel request so upstream AI model stops generating tokens immediately
+  const streamAbortController = new AbortController();
+  const handleClientDisconnect = () => {
+    if (!res.writableEnded && !streamAbortController.signal.aborted) {
+      logger.info('ChatRoute', `Client aborted SSE stream for session ${currentSessionId || 'new'} — propagating AbortSignal to AI model.`);
+      streamAbortController.abort(new Error('CLIENT_ABORTED'));
+    }
+  };
+  res.on('close', handleClientDisconnect);
+  req.on('aborted', handleClientDisconnect);
+
   if (!currentSessionId) {
     const autoTitle = prompt.trim().substring(0, 30) + (prompt.trim().length > 30 ? '...' : '');
     const newSessionRes = await run(
@@ -319,6 +330,7 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       modelConfig,
       history,
       (chunk) => {
+        if (streamAbortController.signal.aborted || res.writableEnded) return;
         // Send chunk to client via SSE
         if (chunk.type === 'progress') {
           res.write(`data: ${JSON.stringify({ type: 'progress', step: chunk.step, summary: chunk.summary })}\n\n`);
@@ -329,8 +341,21 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
         }
       },
       userInfo,
-      currentSessionId
+      currentSessionId,
+      streamAbortController.signal
     );
+
+    if (streamAbortController.signal.aborted || res.writableEnded) {
+      await logger.audit(
+        userId,
+        userEmail,
+        'STREAM_LLM_CANCELLED',
+        `Người dùng đã hủy stream tới ${modelConfig.name} (${aiResult.latency_ms}ms)`,
+        req.ip
+      );
+      if (!res.writableEnded) res.end();
+      return;
+    }
 
     // Save assistant message to database with thinking content, progress steps, choices & performance metrics
     const assistantMsgRes = await run(
@@ -376,18 +401,28 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       created_at: new Date().toISOString()
     };
 
-    res.write(`data: ${JSON.stringify({
-      type: 'done',
-      session_id: currentSessionId,
-      message: finalMessage,
-      updated_quota: updatedQuota.usage
-    })}\n\n`);
-
-    res.end();
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({
+        type: 'done',
+        session_id: currentSessionId,
+        message: finalMessage,
+        updated_quota: updatedQuota.usage
+      })}\n\n`);
+      res.end();
+    }
   } catch (err: any) {
+    if (streamAbortController.signal.aborted || err.message === 'CLIENT_ABORTED') {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     logger.error('ChatRoute', 'Stream error', err);
-    res.write(`data: ${JSON.stringify({ type: 'error', error: err.message || 'Lỗi khi stream từ AI.' })}\n\n`);
-    res.end();
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ type: 'error', error: err.message || 'Lỗi khi stream từ AI.' })}\n\n`);
+      res.end();
+    }
+  } finally {
+    res.off('close', handleClientDisconnect);
+    req.off('aborted', handleClientDisconnect);
   }
 });
 

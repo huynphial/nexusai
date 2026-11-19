@@ -625,15 +625,10 @@ export const ChatWindow: React.FC<Props> = ({
                 />
               )}
 
-              {/* Live Thinking Process (Show immediately when real thinking tokens arrive, even for RAG/step_progress models) */}
-              {((streamingData.thinking && streamingData.thinking.length > 0) ||
-                (thinkingEnabled &&
-                  modelSupportsThinking &&
-                  selectedModel?.provider !== 'step_progress' &&
-                  (!streamingData.progress_steps || streamingData.progress_steps.length === 0) &&
-                  streamingData.isThinking)) && (
+              {/* Live Thinking Process (Only show when actual thinking tokens have streamed) */}
+              {Boolean(streamingData.thinking && streamingData.thinking.length > 0) && (
                 <ThinkingBox
-                  thinking={streamingData.thinking || 'Đang phân tích câu hỏi và chuẩn bị các bước suy luận...'}
+                  thinking={streamingData.thinking!}
                   isLive={Boolean(streamingData.isThinking)}
                 />
               )}
@@ -656,11 +651,7 @@ export const ChatWindow: React.FC<Props> = ({
               ) : (
                 <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 py-1">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-500" />
-                  <span>
-                    {thinkingEnabled && modelSupportsThinking && streamingData.isThinking
-                      ? 'Đang suy luận (Thinking)...'
-                      : 'Đang chuẩn bị phản hồi...'}
-                  </span>
+                  <span>Đang chuẩn bị câu trả lời...</span>
                 </div>
               )}
 
@@ -702,9 +693,11 @@ export const ChatWindow: React.FC<Props> = ({
                 <span>
                   {isStreamPaused
                     ? '⏸️ Đang tạm dừng phát'
-                    : streamingData?.isThinking && thinkingEnabled && modelSupportsThinking
+                    : streamingData?.isThinking && streamingData?.thinking && streamingData.thinking.length > 0
                     ? '🧠 Đang suy luận...'
-                    : '⚡ Đang nhận câu trả lời...'}
+                    : streamingData?.content
+                    ? '⚡ Đang nhận câu trả lời...'
+                    : '⏳ Đang chuẩn bị câu trả lời...'}
                 </span>
               </div>
 
@@ -1045,6 +1038,7 @@ const ProgressTimeline: React.FC<{
   const doneSteps = steps.filter((s) => s.status === 'done').length;
   const hasError = steps.some((s) => s.status === 'error');
   const isRunning = isLive && steps.some((s) => s.status === 'running');
+  const allMcpTools = steps.length > 0 && steps.every((s) => s.phase === 'tool' || s.meta?.kind === 'mcp_tool');
   const totalMs = summary?.total_ms || (steps.length > 0 && steps[steps.length - 1].end_ms && steps[0].start_ms !== undefined ? (steps[steps.length - 1].end_ms! - steps[0].start_ms!) : 0);
 
   return (
@@ -1070,7 +1064,13 @@ const ProgressTimeline: React.FC<{
             </div>
           )}
           <span className="font-bold text-xs">
-            {isRunning ? 'Suy luận từng bước (Đang chạy...)' : 'Suy luận từng bước'}
+            {allMcpTools
+              ? isRunning
+                ? 'Đang gọi công cụ MCP...'
+                : 'Công cụ MCP đã sử dụng'
+              : isRunning
+              ? 'Đang xử lý từng bước...'
+              : 'Tiến trình xử lý từng bước'}
           </span>
           <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-medium bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-800/60">
             {doneSteps}/{steps.length} bước
@@ -1083,7 +1083,7 @@ const ProgressTimeline: React.FC<{
         </div>
 
         <div className="flex items-center gap-1 text-[11px] text-purple-600 dark:text-purple-400">
-          <span>{isOpen ? 'Thu gọn' : 'Xem tiến độ'}</span>
+          <span>{isOpen ? 'Thu gọn' : 'Xem chi tiết'}</span>
           {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
         </div>
       </button>
@@ -1095,7 +1095,14 @@ const ProgressTimeline: React.FC<{
             const isDone = step.status === 'done';
             const isRunningStep = step.status === 'running';
             const isError = step.status === 'error';
-            const isSql = step.meta?.kind === 'sql' || (step.detail && /^(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i.test(step.detail.trim()));
+            const isMcpTool = step.phase === 'tool' || step.meta?.kind === 'mcp_tool';
+            const isSql = !isMcpTool && (step.meta?.kind === 'sql' || (step.detail && /^(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i.test(step.detail.trim())));
+            const statusCode = step.meta?.status_code as number | undefined;
+            const isHttpOk = statusCode !== undefined && statusCode >= 200 && statusCode < 300;
+            const mcpToolName = step.meta?.tool_name || step.title?.replace(/^Gọi công cụ MCP:\s*/i, '') || step.id;
+            const mcpServerName = step.meta?.server_name;
+            const mcpDesc = step.meta?.tool_description || (!isError && step.detail && !step.detail.startsWith('Tham số:') ? step.detail : '');
+            const mcpArgKeys = Array.isArray(step.meta?.arg_keys) ? step.meta.arg_keys : [];
 
             return (
               <div
@@ -1130,16 +1137,42 @@ const ProgressTimeline: React.FC<{
                 {/* Step Content Card */}
                 <div className="bg-white/80 dark:bg-slate-900/80 rounded-xl p-2.5 border border-slate-200/80 dark:border-slate-800 shadow-2xs">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-1.5 font-semibold text-slate-800 dark:text-slate-200">
-                      <span>{step.title || step.id}</span>
-                      {step.phase && (
-                        <span className="text-[9px] px-1.5 py-0.2 rounded font-normal bg-slate-100 dark:bg-slate-800 text-slate-500 uppercase tracking-wider">
-                          {step.phase}
-                        </span>
+                    <div className="flex items-center gap-1.5 font-semibold text-slate-800 dark:text-slate-200 flex-wrap">
+                      {isMcpTool ? (
+                        <>
+                          <Plug className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                          <span className="font-mono text-cyan-700 dark:text-cyan-300">{mcpToolName}</span>
+                          {mcpServerName && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border border-cyan-500/20 font-medium">
+                              {mcpServerName}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span>{step.title || step.id}</span>
+                          {step.phase && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded font-normal bg-slate-100 dark:bg-slate-800 text-slate-500 uppercase tracking-wider">
+                              {step.phase}
+                            </span>
+                          )}
+                        </>
                       )}
                     </div>
 
                     <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                      {isMcpTool && statusCode !== undefined && (
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-semibold border ${
+                            isHttpOk
+                              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/25'
+                              : 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/25'
+                          }`}
+                        >
+                          Mã {statusCode} {isHttpOk ? 'OK' : 'ERR'}
+                        </span>
+                      )}
+
                       {step.duration_ms !== null && step.duration_ms !== undefined ? (
                         <span className="text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
                           {formatDuration(step.duration_ms)}
@@ -1164,24 +1197,53 @@ const ProgressTimeline: React.FC<{
                     </div>
                   </div>
 
-                  {/* Step detail (SQL query or explanation) */}
-                  {step.detail && (
-                    <div className="mt-1.5">
-                      {isSql ? (
-                        isAdmin ? (
-                          <SqlSnippetBox sql={step.detail} stepId={step.id || `sql-${idx}`} />
-                        ) : (
-                          <div className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 italic font-sans">
-                            <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span>Chi tiết câu lệnh truy vấn cơ sở dữ liệu chỉ dành cho tài khoản Quản trị viên (Admin).</span>
-                          </div>
-                        )
-                      ) : (
-                        <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed font-mono">
-                          {step.detail}
+                  {/* Useful MCP Tool metadata (hides raw MCP server response body) */}
+                  {isMcpTool ? (
+                    <div className="mt-1.5 space-y-1 text-[11px] text-slate-600 dark:text-slate-400">
+                      {mcpDesc && (
+                        <p className="leading-relaxed">
+                          <span className="font-semibold text-slate-700 dark:text-slate-300">Tác dụng:</span>{' '}
+                          {mcpDesc}
                         </p>
                       )}
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                        {step.meta?.transport && (
+                          <span className="font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                            Giao thức: {step.meta.transport}
+                          </span>
+                        )}
+                        {mcpArgKeys.length > 0 && (
+                          <span className="font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                            Tham số: {mcpArgKeys.join(', ')}
+                          </span>
+                        )}
+                        {!isRunningStep && (
+                          <span className={isError ? 'text-red-500 font-medium' : 'text-emerald-600 dark:text-emerald-400 font-medium'}>
+                            {isError ? 'Thực thi công cụ gặp lỗi' : 'Đã nhận dữ liệu từ MCP server'}
+                          </span>
+                        )}
+                      </div>
                     </div>
+                  ) : (
+                    /* Non-MCP step detail (SQL query or explanation) */
+                    step.detail && (
+                      <div className="mt-1.5">
+                        {isSql ? (
+                          isAdmin ? (
+                            <SqlSnippetBox sql={step.detail} stepId={step.id || `sql-${idx}`} />
+                          ) : (
+                            <div className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 italic font-sans">
+                              <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span>Chi tiết câu lệnh truy vấn cơ sở dữ liệu chỉ dành cho tài khoản Quản trị viên (Admin).</span>
+                            </div>
+                          )
+                        ) : (
+                          <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed font-mono">
+                            {step.detail}
+                          </p>
+                        )}
+                      </div>
+                    )
                   )}
                 </div>
               </div>
