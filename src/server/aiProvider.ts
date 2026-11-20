@@ -921,9 +921,14 @@ export async function generateAIChatResponse(
         },
       }));
 
+      const isStrictOpenAICloud = /(api\.openai\.com|googleapis\.com|openai\.azure\.com|api\.groq\.com|api\.mistral\.ai|api\.x\.ai|openrouter\.ai|api\.together\.xyz|api\.deepseek\.com)/i.test(baseUrl);
+      const isCustomGateway = isStepProgress || modelConfig.provider === 'custom';
+
       const conversationMessages: any[] = [...fullMessages];
       let toolsEnabledForRequest = openAiTools.length > 0;
       let streamOptionsSupported = true;
+      let thinkSupported = isOllamaNative || isCustomGateway || !isStrictOpenAICloud;
+      let customFieldsSupported = isCustomGateway;
 
       let accumulatedContent = '';
       let accumulatedThinking = '';
@@ -951,7 +956,7 @@ export async function generateAIChatResponse(
         const turnStartedAt = new Date().toISOString();
         const turnKind: LLMTraceTurn['kind'] = isAutoContinueTurn
           ? 'auto_continue'
-          : turn > 0
+          : debugTraces.length > 0
           ? 'tool_followup'
           : 'initial';
 
@@ -970,7 +975,9 @@ export async function generateAIChatResponse(
           if (modelPresence !== 0) ollamaOpts.presence_penalty = modelPresence;
           if (modelFrequency !== 0) ollamaOpts.frequency_penalty = modelFrequency;
           requestPayload.options = ollamaOpts;
-          requestPayload.think = allowThinking;
+          if (thinkSupported) {
+            requestPayload.think = allowThinking;
+          }
         } else {
           requestPayload.temperature = modelTemp;
           requestPayload.top_p = modelTopP;
@@ -980,10 +987,8 @@ export async function generateAIChatResponse(
           if (isStreamWanted && !isStepProgress && streamOptionsSupported) {
             requestPayload.stream_options = { include_usage: true };
           }
-          if (allowThinking) {
-            requestPayload.think = true;
-          } else if (!baseUrl.includes('api.openai.com')) {
-            requestPayload.think = false;
+          if (thinkSupported) {
+            requestPayload.think = Boolean(allowThinking);
           }
         }
 
@@ -994,11 +999,13 @@ export async function generateAIChatResponse(
           }
         }
 
-        if (sessionId !== undefined && sessionId !== null) {
-          requestPayload.session_id = sessionId;
-        }
-        if (userInfo?.id !== undefined && userInfo?.id !== null) {
-          requestPayload.user_id = userInfo.id;
+        if (customFieldsSupported) {
+          if (sessionId !== undefined && sessionId !== null) {
+            requestPayload.session_id = sessionId;
+          }
+          if (userInfo?.id !== undefined && userInfo?.id !== null) {
+            requestPayload.user_id = userInfo.id;
+          }
         }
 
         const requestSnapshotMessages = cloneMessagesForTrace(conversationMessages);
@@ -1094,17 +1101,29 @@ export async function generateAIChatResponse(
 
         if (!response.ok) {
           const errText = await response.text();
-          // Graceful fallback if upstream endpoint doesn't support `stream_options`
-          if (streamOptionsSupported && response.status === 400 && /stream_options|unknown/i.test(errText)) {
-            logger.warn('AIProvider', `Endpoint rejected stream_options (${errText.slice(0, 120)}). Retrying without stream_options.`);
-            streamOptionsSupported = false;
-            continue;
-          }
-          // Graceful fallback if Ollama/upstream model doesn't support `tools`
-          if (toolsEnabledForRequest && response.status === 400 && /tool|function/i.test(errText)) {
-            logger.warn('AIProvider', `Model "${modelId}" rejected tools parameter (${errText.slice(0, 150)}). Retrying without MCP tools.`);
-            toolsEnabledForRequest = false;
-            continue;
+          // Graceful fallback if upstream endpoint rejects non-standard fields (think, session_id, user_id, stream_options, tools)
+          if (response.status === 400) {
+            let shouldRetry = false;
+            if (thinkSupported && /["'`]?think["'`]?/i.test(errText)) {
+              thinkSupported = false;
+              shouldRetry = true;
+            }
+            if (customFieldsSupported && /(session_id|user_id)/i.test(errText)) {
+              customFieldsSupported = false;
+              shouldRetry = true;
+            }
+            if (streamOptionsSupported && /stream_options/i.test(errText)) {
+              streamOptionsSupported = false;
+              shouldRetry = true;
+            }
+            if (toolsEnabledForRequest && /\b(tools?|tool_choice|function_declarations)\b/i.test(errText)) {
+              toolsEnabledForRequest = false;
+              shouldRetry = true;
+            }
+            if (shouldRetry) {
+              logger.warn('AIProvider', `Model "${modelId}" returned HTTP 400 for optional fields; retrying with cleaner OpenAI payload.`);
+              continue;
+            }
           }
 
           clearTimeout(timer);
