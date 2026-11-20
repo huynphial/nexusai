@@ -473,6 +473,7 @@ export async function generateAIChatResponse(
         ];
 
         let turnFunctionCalls: Array<{ name: string; args: Record<string, any> }> = [];
+        const turnModelParts: any[] = [];
         let turnText = '';
         let turnThinking = '';
         let turnFinishReason = '';
@@ -542,7 +543,21 @@ export async function generateAIChatResponse(
               }
             }
             const chunkText = chunk.text || '';
-            const hasCandidateParts = Boolean((chunk as any).candidates?.[0]?.content?.parts?.some((p: any) => p.text || p.functionCall));
+            const rawCandidateParts = (chunk as any).candidates?.[0]?.content?.parts;
+            if (Array.isArray(rawCandidateParts) && rawCandidateParts.length > 0) {
+              for (const part of rawCandidateParts) {
+                if (
+                  part &&
+                  (part.functionCall ||
+                    part.thought ||
+                    part.thoughtSignature ||
+                    (typeof part.text === 'string' && part.text.length > 0))
+                ) {
+                  turnModelParts.push(part);
+                }
+              }
+            }
+            const hasCandidateParts = Boolean(rawCandidateParts?.some((p: any) => p.text || p.functionCall));
             if (firstOutputTokenAt === null && (chunkText.length > 0 || hasCandidateParts)) {
               firstOutputTokenAt = Date.now();
             }
@@ -588,6 +603,10 @@ export async function generateAIChatResponse(
             if (typeof um.totalTokenCount === 'number') {
               turnTokensTotalReported = um.totalTokenCount;
             }
+          }
+          const rawCandidateParts = (res as any).candidates?.[0]?.content?.parts;
+          if (Array.isArray(rawCandidateParts) && rawCandidateParts.length > 0) {
+            turnModelParts.push(...rawCandidateParts);
           }
           if (Array.isArray(res.functionCalls) && res.functionCalls.length > 0) {
             for (const fc of res.functionCalls) {
@@ -692,12 +711,14 @@ export async function generateAIChatResponse(
 
         isAutoContinueTurn = false;
 
-        // Execute requested MCP tools and feed results back to Gemini
+        // Execute requested MCP tools and feed results back to Gemini (preserving thoughtSignature/thought parts)
         formattedContents.push({
           role: 'model',
-          parts: turnFunctionCalls.map((fc) => ({
-            functionCall: { name: fc.name, args: fc.args },
-          })),
+          parts: turnModelParts.some((p) => p.functionCall)
+            ? turnModelParts
+            : turnFunctionCalls.map((fc) => ({
+                functionCall: { name: fc.name, args: fc.args },
+              })),
         });
 
         const responseParts: any[] = [];
@@ -1182,7 +1203,14 @@ export async function generateAIChatResponse(
         let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedContent.length > 0;
         const turnToolCallMap = new Map<
           number,
-          { id: string; name: string; argumentsStr: string; argumentsObj: Record<string, any> | null }
+          {
+            id: string;
+            name: string;
+            argumentsStr: string;
+            argumentsObj: Record<string, any> | null;
+            extraContent?: any;
+            thoughtSignature?: string;
+          }
         >();
 
         if (isStreamWanted && response.body && onChunk) {
@@ -1399,6 +1427,31 @@ export async function generateAIChatResponse(
                   } else if (tc.function?.arguments && typeof tc.function.arguments === 'object') {
                     entry.argumentsObj = tc.function.arguments;
                   }
+                  if (tc.extra_content !== undefined) {
+                    if (
+                      entry.extraContent &&
+                      typeof entry.extraContent === 'object' &&
+                      typeof tc.extra_content === 'object'
+                    ) {
+                      entry.extraContent = {
+                        ...entry.extraContent,
+                        ...tc.extra_content,
+                        ...(entry.extraContent.google || tc.extra_content.google
+                          ? {
+                              google: {
+                                ...(entry.extraContent.google || {}),
+                                ...(tc.extra_content.google || {}),
+                              },
+                            }
+                          : {}),
+                      };
+                    } else {
+                      entry.extraContent = tc.extra_content;
+                    }
+                  }
+                  if (tc.thought_signature !== undefined) {
+                    entry.thoughtSignature = tc.thought_signature;
+                  }
                 });
               }
 
@@ -1530,6 +1583,8 @@ export async function generateAIChatResponse(
                 name: tc.function?.name || '',
                 argumentsStr: typeof argsVal === 'string' ? argsVal : '',
                 argumentsObj: argsVal && typeof argsVal === 'object' ? argsVal : null,
+                ...(tc.extra_content !== undefined ? { extraContent: tc.extra_content } : {}),
+                ...(tc.thought_signature !== undefined ? { thoughtSignature: tc.thought_signature } : {}),
               });
             });
           }
@@ -1710,6 +1765,8 @@ export async function generateAIChatResponse(
                 name: tc.name,
                 arguments: tc.argumentsStr || JSON.stringify(tc.parsedArgs),
               },
+              ...(tc.extraContent !== undefined ? { extra_content: tc.extraContent } : {}),
+              ...(tc.thoughtSignature !== undefined ? { thought_signature: tc.thoughtSignature } : {}),
             })),
           });
         }
