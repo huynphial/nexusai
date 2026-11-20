@@ -1382,6 +1382,22 @@ const ProgressTimeline: React.FC<{
             const mcpToolName = step.meta?.tool_name || step.title?.replace(/^Gọi công cụ MCP:\s*/i, '') || step.id;
             const mcpServerName = step.meta?.server_name;
             const mcpArgKeys = Array.isArray(step.meta?.arg_keys) ? step.meta.arg_keys : [];
+            const mcpArgsObj =
+              step.meta?.args && typeof step.meta.args === 'object' && !Array.isArray(step.meta.args)
+                ? (step.meta.args as Record<string, any>)
+                : null;
+            const mcpArgEntries = mcpArgsObj ? Object.entries(mcpArgsObj) : [];
+            const formatMcpArgValue = (val: any): string => {
+              if (val === null) return 'null';
+              if (val === undefined) return '';
+              if (typeof val === 'string') return val === '' ? '""' : val;
+              if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+              try {
+                return JSON.stringify(val);
+              } catch {
+                return String(val);
+              }
+            };
 
             return (
               <div
@@ -1485,9 +1501,12 @@ const ProgressTimeline: React.FC<{
                             Giao thức: {step.meta.transport}
                           </span>
                         )}
-                        {mcpArgKeys.length > 0 && (
-                          <span className="font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
-                            Tham số: {mcpArgKeys.join(', ')}
+                        {(mcpArgEntries.length > 0 || mcpArgKeys.length > 0) && (
+                          <span className="font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded break-words">
+                            Tham số:{' '}
+                            {mcpArgEntries.length > 0
+                              ? mcpArgEntries.map(([k, v]) => `${k}: ${formatMcpArgValue(v)}`).join(', ')
+                              : mcpArgKeys.join(', ')}
                           </span>
                         )}
                         {!isRunningStep && (

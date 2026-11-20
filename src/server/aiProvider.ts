@@ -276,6 +276,26 @@ function normalizeOpenAIHistoryMessages(
   return normalized;
 }
 
+function sanitizeMcpArgsForDisplay(args?: Record<string, any> | null): Record<string, any> {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return {};
+  const result: Record<string, any> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v === 'string') {
+      result[k] = v.length > 200 ? `${v.slice(0, 200)}...` : v;
+    } else if (v === null || typeof v === 'number' || typeof v === 'boolean') {
+      result[k] = v;
+    } else if (v !== undefined) {
+      try {
+        const serialized = JSON.stringify(v);
+        result[k] = serialized.length > 200 ? `${serialized.slice(0, 200)}...` : v;
+      } catch {
+        result[k] = String(v);
+      }
+    }
+  }
+  return result;
+}
+
 
 function computeTurnSpeedMetrics(params: {
   durationMs: number;
@@ -898,6 +918,7 @@ export async function generateAIChatResponse(
               server_name: serverName,
               transport: binding?.transport || '',
               arg_keys: Object.keys(fc.args || {}),
+              args: sanitizeMcpArgsForDisplay(fc.args),
             },
           };
           geminiSteps.push(runningStep);
@@ -941,6 +962,7 @@ export async function generateAIChatResponse(
               transport: toolResult.transport || binding?.transport || '',
               status_code: toolResult.statusCode,
               arg_keys: Object.keys(fc.args || {}),
+              args: sanitizeMcpArgsForDisplay(fc.args),
               ok: !toolResult.isError,
             },
           };
@@ -2026,6 +2048,7 @@ export async function generateAIChatResponse(
               server_name: serverName,
               transport: binding?.transport || '',
               arg_keys: Object.keys(tc.parsedArgs || {}),
+              args: sanitizeMcpArgsForDisplay(tc.parsedArgs),
             },
           };
           accumulatedSteps.push(runningStep);
@@ -2069,6 +2092,7 @@ export async function generateAIChatResponse(
               transport: toolResult.transport || binding?.transport || '',
               status_code: toolResult.statusCode,
               arg_keys: Object.keys(tc.parsedArgs || {}),
+              args: sanitizeMcpArgsForDisplay(tc.parsedArgs),
               ok: !toolResult.isError,
             },
           };
