@@ -75,6 +75,7 @@ export interface AIModel {
   frequency_penalty?: number;
   enable_mcp?: number | boolean;
   mcp_server_ids?: number[];
+  auto_continue?: number | boolean;
   is_active: number | boolean;
   created_at?: string;
 }

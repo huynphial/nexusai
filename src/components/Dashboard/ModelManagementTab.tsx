@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { AIModel, McpServer } from '../../types';
 import { APP_CONFIG } from '../../config/appConfig';
-import { Plus, Edit2, Trash2, Cpu, Clock, Radio, Brain, CheckCircle, XCircle, Sliders, Plug } from 'lucide-react';
+import { Plus, Edit2, Trash2, Cpu, Clock, Radio, Brain, CheckCircle, XCircle, Sliders, Plug, FastForward } from 'lucide-react';
 
 interface Props {
   models: AIModel[];
@@ -37,6 +37,7 @@ export const ModelManagementTab: React.FC<Props> = ({
   const [frequencyPenalty, setFrequencyPenalty] = useState<number>(0);
   const [enableMcp, setEnableMcp] = useState<boolean>(false);
   const [mcpServerIds, setMcpServerIds] = useState<number[]>([]);
+  const [autoContinue, setAutoContinue] = useState<boolean>(false);
   const [isActive, setIsActive] = useState<boolean>(true);
   const [loading, setLoading] = useState(false);
 
@@ -58,6 +59,7 @@ export const ModelManagementTab: React.FC<Props> = ({
     setFrequencyPenalty(0);
     setEnableMcp(false);
     setMcpServerIds([]);
+    setAutoContinue(false);
     setIsActive(true);
     setIsModalOpen(true);
   };
@@ -80,6 +82,7 @@ export const ModelManagementTab: React.FC<Props> = ({
     setFrequencyPenalty(m.frequency_penalty ?? 0);
     setEnableMcp(m.enable_mcp === 1 || m.enable_mcp === true);
     setMcpServerIds(Array.isArray(m.mcp_server_ids) ? m.mcp_server_ids : []);
+    setAutoContinue(m.auto_continue === 1 || m.auto_continue === true);
     setIsActive(m.is_active === 1 || m.is_active === true);
     setIsModalOpen(true);
   };
@@ -115,6 +118,7 @@ export const ModelManagementTab: React.FC<Props> = ({
         frequency_penalty: frequencyPenalty,
         enable_mcp: enableMcp ? 1 : 0,
         mcp_server_ids: mcpServerIds,
+        auto_continue: autoContinue ? 1 : 0,
         is_active: isActive,
       };
 
@@ -211,6 +215,14 @@ export const ModelManagementTab: React.FC<Props> = ({
                         {(m.enable_mcp === 1 || m.enable_mcp === true) && (
                           <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 font-medium border border-cyan-500/20">
                             <Plug className="w-2.5 h-2.5" /> MCP
+                          </span>
+                        )}
+                        {(m.auto_continue === 1 || m.auto_continue === true) && (
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 font-medium border border-amber-500/20"
+                            title="Tự động prompt continue ngầm khi câu trả lời chưa hoàn thành"
+                          >
+                            <FastForward className="w-2.5 h-2.5" /> Auto-Continue
                           </span>
                         )}
                         <span
@@ -390,6 +402,18 @@ export const ModelManagementTab: React.FC<Props> = ({
                       className="rounded text-cyan-600 focus:ring-cyan-500"
                     />
                     <span>Bật kết nối công cụ MCP Tools (Tương thích Ollama, OpenAI &amp; Gemini)</span>
+                  </label>
+
+                  <label className="flex items-start gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={autoContinue}
+                      onChange={(e) => setAutoContinue(e.target.checked)}
+                      className="rounded text-amber-600 focus:ring-amber-500 mt-0.5"
+                    />
+                    <span>
+                      Tự động gửi prompt <code className="px-1 py-0.2 rounded bg-slate-200/70 dark:bg-slate-800 font-mono text-[11px]">continue</code> ngầm khi phản hồi chưa hoàn thành (content rỗng hoặc kết thúc giữa chừng không có dấu chấm câu)
+                    </span>
                   </label>
                 </div>
               </div>

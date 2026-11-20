@@ -32,6 +32,7 @@ router.get('/', async (req: CustomRequest, res: Response) => {
         ...m,
         enable_mcp: m.enable_mcp ?? 1,
         mcp_server_ids: parsedMcpIds,
+        auto_continue: m.auto_continue ?? 0,
         has_token: !!m.api_token,
         masked_token: maskToken(m.api_token)
       };
@@ -64,6 +65,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
       frequency_penalty,
       enable_mcp,
       mcp_server_ids,
+      auto_continue,
       is_active
     } = req.body;
 
@@ -84,9 +86,9 @@ router.post('/', async (req: CustomRequest, res: Response) => {
         name, provider, model_identifier, api_url, api_token, system_prompt,
         timeout_seconds, enable_stream, enable_thinking,
         temperature, top_p, max_tokens, presence_penalty, frequency_penalty,
-        enable_mcp, mcp_server_ids, is_active
+        enable_mcp, mcp_server_ids, auto_continue, is_active
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         name.trim(),
@@ -105,6 +107,7 @@ router.post('/', async (req: CustomRequest, res: Response) => {
         Number.isFinite(parsedFrequency) ? parsedFrequency : 0,
         enable_mcp !== undefined ? (enable_mcp ? 1 : 0) : 1,
         mcpIdsJson,
+        auto_continue !== undefined ? (auto_continue ? 1 : 0) : 0,
         is_active !== undefined ? (is_active ? 1 : 0) : 1
       ]
     );
@@ -146,6 +149,7 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       frequency_penalty,
       enable_mcp,
       mcp_server_ids,
+      auto_continue,
       is_active
     } = req.body;
 
@@ -174,7 +178,7 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
       SET name = ?, provider = ?, model_identifier = ?, api_url = ?, api_token = ?, system_prompt = ?,
           timeout_seconds = ?, enable_stream = ?, enable_thinking = ?,
           temperature = ?, top_p = ?, max_tokens = ?, presence_penalty = ?, frequency_penalty = ?,
-          enable_mcp = ?, mcp_server_ids = ?, is_active = ?
+          enable_mcp = ?, mcp_server_ids = ?, auto_continue = ?, is_active = ?
       WHERE id = ?
       `,
       [
@@ -194,6 +198,7 @@ router.put('/:id', async (req: CustomRequest, res: Response) => {
         Number.isFinite(nextFrequency) ? nextFrequency : 0,
         enable_mcp !== undefined ? (enable_mcp ? 1 : 0) : (existing.enable_mcp ?? 1),
         nextMcpIds,
+        auto_continue !== undefined ? (auto_continue ? 1 : 0) : (existing.auto_continue ?? 0),
         is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active,
         modelId
       ]

@@ -23,7 +23,7 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
       SELECT m.id, m.name, m.provider, m.model_identifier, m.system_prompt,
              m.timeout_seconds, m.enable_stream, m.enable_thinking,
              m.temperature, m.top_p, m.max_tokens, m.presence_penalty, m.frequency_penalty,
-             m.enable_mcp, m.mcp_server_ids,
+             m.enable_mcp, m.mcp_server_ids, m.auto_continue,
              m.is_active,
              gma.rate_limit_period, gma.rate_limit_requests, gma.max_tokens_group, gma.max_tokens_per_user
       FROM ai_models m
@@ -86,6 +86,7 @@ router.get('/available-models', async (req: CustomRequest, res: Response) => {
         frequency_penalty: m.frequency_penalty ?? 0,
         enable_mcp: m.enable_mcp ?? 1,
         mcp_server_ids: parsedMcpIds,
+        auto_continue: m.auto_continue ?? 0,
         mcp_enabled_for_user: effectiveMcpServers.length > 0,
         active_mcp_servers: effectiveMcpServers.map((s: any) => ({ id: Number(s.id), name: s.name })),
         is_default: m.id === defaultModelId,

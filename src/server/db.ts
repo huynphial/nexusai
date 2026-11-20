@@ -155,6 +155,7 @@ export async function initDatabase() {
         frequency_penalty REAL DEFAULT 0,
         enable_mcp INTEGER DEFAULT 1,
         mcp_server_ids TEXT,
+        auto_continue INTEGER DEFAULT 0,
         is_active INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -298,6 +299,9 @@ export async function initDatabase() {
       }
       if (!modelColNames.includes('mcp_server_ids')) {
         await run(`ALTER TABLE ai_models ADD COLUMN mcp_server_ids TEXT`);
+      }
+      if (!modelColNames.includes('auto_continue')) {
+        await run(`ALTER TABLE ai_models ADD COLUMN auto_continue INTEGER DEFAULT 0`);
       }
 
       const msgCols = await query(`PRAGMA table_info(chat_messages)`);

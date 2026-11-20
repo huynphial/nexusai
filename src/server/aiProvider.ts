@@ -25,6 +25,7 @@ export interface AIModelConfig {
   frequency_penalty?: number;
   enable_mcp?: number | boolean;
   mcp_server_ids?: number[] | string;
+  auto_continue?: number | boolean;
 }
 
 export interface StreamChunk {
@@ -72,6 +73,55 @@ export interface UserInfoTracing {
   group_id?: number;
 }
 
+const SILENT_CONTINUE_PROMPT_EMPTY =
+  'continue. Hãy hoàn thành và trả lời đầy đủ nội dung câu hỏi trên bằng ngôn ngữ phù hợp, không để trống câu trả lời.';
+const SILENT_CONTINUE_PROMPT_PARTIAL =
+  'continue. Hãy viết tiếp chính xác từ chỗ bạn vừa dừng lại để hoàn thành câu trả lời, không lặp lại phần đã viết và kết thúc câu đầy đủ.';
+
+export function isResponseIncomplete(params: {
+  content: string;
+  finishReason?: string | null;
+  hasChoices?: boolean;
+}): { incomplete: boolean; reason: string } {
+  const { content, finishReason, hasChoices } = params;
+  if (hasChoices) {
+    return { incomplete: false, reason: 'has_choices' };
+  }
+
+  const trimmed = (content || '').trim();
+  if (!trimmed) {
+    return { incomplete: true, reason: 'empty_content' };
+  }
+
+  const normalizedReason = (finishReason || '').toLowerCase();
+  if (normalizedReason === 'length' || normalizedReason === 'max_tokens') {
+    return { incomplete: true, reason: `finish_reason:${normalizedReason}` };
+  }
+
+  // Unclosed markdown fenced code block
+  const fenceMatches = trimmed.match(/```/g);
+  if (fenceMatches && fenceMatches.length % 2 === 1) {
+    return { incomplete: true, reason: 'unclosed_code_fence' };
+  }
+
+  // Closed code block at the end of message
+  if (/```\s*$/.test(trimmed)) {
+    return { incomplete: false, reason: 'closed_code_fence' };
+  }
+
+  // Strip trailing quotes, brackets, or markdown emphasis markers before inspecting punctuation
+  const strippedTail = trimmed.replace(/[\s"'”’)\]}>*_`]+$/g, '');
+  if (!strippedTail) {
+    return { incomplete: true, reason: 'empty_after_strip' };
+  }
+
+  if (/[.!?…！？。]$/.test(strippedTail)) {
+    return { incomplete: false, reason: 'complete_punctuation' };
+  }
+
+  return { incomplete: true, reason: 'missing_ending_punctuation' };
+}
+
 export async function generateAIChatResponse(
   modelConfig: AIModelConfig,
   messages: ChatMessageItem[],
@@ -84,10 +134,11 @@ export async function generateAIChatResponse(
   const timeoutSeconds = modelConfig.timeout_seconds && modelConfig.timeout_seconds > 0 ? modelConfig.timeout_seconds : 60;
   const isStreamWanted = onChunk && (modelConfig.enable_stream === 1 || modelConfig.enable_stream === true || modelConfig.enable_stream === undefined);
   const allowThinking = modelConfig.enable_thinking === 1 || modelConfig.enable_thinking === true || modelConfig.enable_thinking === undefined;
+  const autoContinueEnabled = modelConfig.auto_continue === 1 || modelConfig.auto_continue === true;
 
   const startTime = Date.now();
 
-  logger.debug('AIProvider', `Initiating call to "${modelConfig.name}" (${modelConfig.provider}:${modelConfig.model_identifier}) | Timeout: ${timeoutSeconds}s | Stream: ${!!isStreamWanted} | Thinking: ${allowThinking}`);
+  logger.debug('AIProvider', `Initiating call to "${modelConfig.name}" (${modelConfig.provider}:${modelConfig.model_identifier}) | Timeout: ${timeoutSeconds}s | Stream: ${!!isStreamWanted} | Thinking: ${allowThinking} | AutoContinue: ${autoContinueEnabled}`);
 
   // Setup AbortController combining max timeout AND client cancellation signal
   const abortController = new AbortController();
@@ -188,12 +239,39 @@ export async function generateAIChatResponse(
       }
 
       const MAX_TOOL_TURNS = 6;
-      for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+      const MAX_AUTO_CONTINUE = 3;
+      let autoContinueCount = 0;
+      let isAutoContinueTurn = false;
+
+      for (let turn = 0; turn < MAX_TOOL_TURNS + MAX_AUTO_CONTINUE; turn++) {
         if (abortController.signal.aborted) {
           throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
         }
 
         let turnFunctionCalls: Array<{ name: string; args: Record<string, any> }> = [];
+        let turnText = '';
+        let turnFinishReason = '';
+        let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedText.length > 0;
+
+        const appendGeminiText = (chunkText: string, emitStream: boolean) => {
+          if (!chunkText) return;
+          let finalChunk = chunkText;
+          if (pendingContinuationPrefixCheck) {
+            pendingContinuationPrefixCheck = false;
+            if (
+              accumulatedText.length > 0 &&
+              !/\s$/.test(accumulatedText) &&
+              !/^[\s.,!?;:)\]}\n\r"'”’]/.test(finalChunk)
+            ) {
+              finalChunk = ' ' + finalChunk;
+            }
+          }
+          turnText += finalChunk;
+          accumulatedText += finalChunk;
+          if (emitStream && onChunk) {
+            onChunk({ type: 'content', text: finalChunk });
+          }
+        };
 
         if (isStreamWanted) {
           const streamResult = await ai.models.generateContentStream({
@@ -206,6 +284,10 @@ export async function generateAIChatResponse(
           for await (const chunk of streamResult) {
             if (abortController.signal.aborted) {
               throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
+            }
+            const candidateFinish = (chunk as any).candidates?.[0]?.finishReason;
+            if (candidateFinish) {
+              turnFinishReason = String(candidateFinish);
             }
             if (Array.isArray(chunk.functionCalls) && chunk.functionCalls.length > 0) {
               for (const fc of chunk.functionCalls) {
@@ -226,12 +308,10 @@ export async function generateAIChatResponse(
                 accumulatedThinking = extracted.thinkingContent;
                 onChunk({ type: 'thinking', text: chunkText.replace(/<\/?think>/g, '') });
               } else {
-                accumulatedText += chunkText;
-                onChunk({ type: 'content', text: chunkText });
+                appendGeminiText(chunkText, true);
               }
             } else {
-              accumulatedText += chunkText;
-              onChunk({ type: 'content', text: chunkText });
+              appendGeminiText(chunkText, true);
             }
           }
         } else {
@@ -240,6 +320,10 @@ export async function generateAIChatResponse(
             contents: formattedContents as any,
             config: geminiConfig,
           });
+          const candidateFinish = (res as any).candidates?.[0]?.finishReason;
+          if (candidateFinish) {
+            turnFinishReason = String(candidateFinish);
+          }
           if (Array.isArray(res.functionCalls) && res.functionCalls.length > 0) {
             for (const fc of res.functionCalls) {
               if (fc.name) {
@@ -248,13 +332,40 @@ export async function generateAIChatResponse(
             }
           }
           if (res.text) {
-            accumulatedText += res.text;
+            appendGeminiText(res.text, false);
           }
         }
 
         if (turnFunctionCalls.length === 0) {
+          if (
+            autoContinueEnabled &&
+            !abortController.signal.aborted &&
+            autoContinueCount < MAX_AUTO_CONTINUE
+          ) {
+            const check = isResponseIncomplete({
+              content: accumulatedText,
+              finishReason: turnFinishReason,
+            });
+            if (check.incomplete) {
+              autoContinueCount++;
+              isAutoContinueTurn = true;
+              logger.info(
+                'AIProvider',
+                `[Auto-Continue #${autoContinueCount}] Gemini "${modelName}" ended incomplete (${check.reason}). Sending silent continue prompt.`
+              );
+              if (turnText.trim().length > 0) {
+                formattedContents.push({ role: 'model', parts: [{ text: turnText }] });
+                formattedContents.push({ role: 'user', parts: [{ text: SILENT_CONTINUE_PROMPT_PARTIAL }] });
+              } else {
+                formattedContents.push({ role: 'user', parts: [{ text: SILENT_CONTINUE_PROMPT_EMPTY }] });
+              }
+              continue;
+            }
+          }
           break;
         }
+
+        isAutoContinueTurn = false;
 
         // Execute requested MCP tools and feed results back to Gemini
         formattedContents.push({
@@ -479,8 +590,11 @@ export async function generateAIChatResponse(
       let reportedTotalTokens = 0;
 
       const MAX_TOOL_TURNS = 6;
+      const MAX_AUTO_CONTINUE = 3;
+      let autoContinueCount = 0;
+      let isAutoContinueTurn = false;
 
-      for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+      for (let turn = 0; turn < MAX_TOOL_TURNS + MAX_AUTO_CONTINUE; turn++) {
         if (abortController.signal.aborted) {
           throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
         }
@@ -606,6 +720,8 @@ export async function generateAIChatResponse(
         }
 
         let turnContent = '';
+        let turnFinishReason = '';
+        let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedContent.length > 0;
         const turnToolCallMap = new Map<
           number,
           { id: string; name: string; argumentsStr: string; argumentsObj: Record<string, any> | null }
@@ -617,6 +733,24 @@ export async function generateAIChatResponse(
           let buffer = '';
           let inThinkingTag = false;
           let tagBuffer = '';
+
+          const emitTurnContent = (text: string) => {
+            if (!text) return;
+            let finalChunk = text;
+            if (pendingContinuationPrefixCheck) {
+              pendingContinuationPrefixCheck = false;
+              if (
+                accumulatedContent.length > 0 &&
+                !/\s$/.test(accumulatedContent) &&
+                !/^[\s.,!?;:)\]}\n\r"'”’]/.test(finalChunk)
+              ) {
+                finalChunk = ' ' + finalChunk;
+              }
+            }
+            turnContent += finalChunk;
+            accumulatedContent += finalChunk;
+            onChunk({ type: 'content', text: finalChunk });
+          };
 
           const getPartialSuffixMatch = (str: string, tag: string): number => {
             const maxLen = Math.min(str.length, tag.length - 1);
@@ -659,9 +793,7 @@ export async function generateAIChatResponse(
                 if (openIdx !== -1) {
                   const contentPart = tagBuffer.slice(0, openIdx);
                   if (contentPart) {
-                    turnContent += contentPart;
-                    accumulatedContent += contentPart;
-                    onChunk({ type: 'content', text: contentPart });
+                    emitTurnContent(contentPart);
                   }
                   tagBuffer = tagBuffer.slice(openIdx + '<think>'.length);
                   inThinkingTag = true;
@@ -670,9 +802,7 @@ export async function generateAIChatResponse(
                   const safeLen = tagBuffer.length - partialLen;
                   if (safeLen > 0) {
                     const contentPart = tagBuffer.slice(0, safeLen);
-                    turnContent += contentPart;
-                    accumulatedContent += contentPart;
-                    onChunk({ type: 'content', text: contentPart });
+                    emitTurnContent(contentPart);
                     tagBuffer = tagBuffer.slice(safeLen);
                   }
                   break;
@@ -692,7 +822,12 @@ export async function generateAIChatResponse(
             try {
               const parsed = JSON.parse(jsonStr);
 
-              // Track reported token counts if available
+              // Track reported token counts and finish/done reason if available
+              if (parsed.choices?.[0]?.finish_reason) {
+                turnFinishReason = String(parsed.choices[0].finish_reason);
+              } else if (parsed.done_reason) {
+                turnFinishReason = String(parsed.done_reason);
+              }
               if (typeof parsed.usage?.total_tokens === 'number') {
                 reportedTotalTokens += parsed.usage.total_tokens;
               } else if (typeof parsed.eval_count === 'number' || typeof parsed.prompt_eval_count === 'number') {
@@ -848,9 +983,7 @@ export async function generateAIChatResponse(
                 onChunk({ type: 'thinking', text: tagBuffer });
               }
             } else {
-              turnContent += tagBuffer;
-              accumulatedContent += tagBuffer;
-              onChunk({ type: 'content', text: tagBuffer });
+              emitTurnContent(tagBuffer);
             }
             tagBuffer = '';
           }
@@ -858,6 +991,7 @@ export async function generateAIChatResponse(
           const data = await response.json();
           const messageObj = data.choices?.[0]?.message || data.message;
           const rawContent = messageObj?.content ?? data.response ?? '';
+          turnFinishReason = String(data.choices?.[0]?.finish_reason || data.done_reason || '');
           const reasoningContent =
             messageObj?.thinking ||
             messageObj?.reasoning_content ||
@@ -888,7 +1022,14 @@ export async function generateAIChatResponse(
           const extracted = extractThinkingFromContent(rawContent);
           turnContent = extracted.cleanContent;
           if (turnContent) {
-            accumulatedContent += (accumulatedContent ? '\n' : '') + turnContent;
+            if (isAutoContinueTurn && accumulatedContent.length > 0) {
+              const needsSpace =
+                !/\s$/.test(accumulatedContent) &&
+                !/^[\s.,!?;:)\]}\n\r"'”’]/.test(turnContent);
+              accumulatedContent += (needsSpace ? ' ' : '') + turnContent;
+            } else {
+              accumulatedContent += (accumulatedContent ? '\n' : '') + turnContent;
+            }
           }
           if (reasoningContent || extracted.thinkingContent) {
             accumulatedThinking += (accumulatedThinking ? '\n' : '') + (reasoningContent || extracted.thinkingContent || '');
@@ -910,11 +1051,40 @@ export async function generateAIChatResponse(
         // Check if the model requested any MCP tool calls in this turn
         const pendingToolCalls = Array.from(turnToolCallMap.values()).filter((tc) => tc.name.trim().length > 0);
         if (pendingToolCalls.length === 0 || !toolsEnabledForRequest) {
-          if (!accumulatedContent && !accumulatedThinking && turn === 0) {
+          if (
+            autoContinueEnabled &&
+            !abortController.signal.aborted &&
+            autoContinueCount < MAX_AUTO_CONTINUE
+          ) {
+            const check = isResponseIncomplete({
+              content: accumulatedContent,
+              finishReason: turnFinishReason,
+              hasChoices: Boolean(accumulatedChoices),
+            });
+            if (check.incomplete) {
+              autoContinueCount++;
+              isAutoContinueTurn = true;
+              logger.info(
+                'AIProvider',
+                `[Auto-Continue #${autoContinueCount}] Model "${modelConfig.name}" ended incomplete (${check.reason}). Sending silent continue prompt.`
+              );
+              if (turnContent.trim().length > 0) {
+                conversationMessages.push({ role: 'assistant', content: turnContent });
+                conversationMessages.push({ role: 'user', content: SILENT_CONTINUE_PROMPT_PARTIAL });
+              } else {
+                conversationMessages.push({ role: 'user', content: SILENT_CONTINUE_PROMPT_EMPTY });
+              }
+              continue;
+            }
+          }
+
+          if (!accumulatedContent && !accumulatedThinking) {
             accumulatedContent = 'Không có phản hồi từ dịch vụ AI.';
           }
           break;
         }
+
+        isAutoContinueTurn = false;
 
         // Parse arguments and append assistant tool-call message to conversationMessages
         const parsedCalls = pendingToolCalls.map((tc) => {
@@ -1034,6 +1204,10 @@ export async function generateAIChatResponse(
             });
           }
         }
+      }
+
+      if (!accumulatedContent && !accumulatedThinking) {
+        accumulatedContent = 'Không có phản hồi từ dịch vụ AI.';
       }
 
       clearTimeout(timer);
