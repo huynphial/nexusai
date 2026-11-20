@@ -55,6 +55,42 @@ export interface ProgressSummary {
   steps: ProgressStep[];
 }
 
+export interface LLMTraceTurn {
+  turn: number;
+  kind: 'initial' | 'tool_followup' | 'auto_continue' | 'fallback';
+  provider: string;
+  model: string;
+  endpoint?: string;
+  started_at: string;
+  duration_ms: number;
+  status_code?: number;
+  finish_reason?: string;
+  tokens_in: number;
+  tokens_out: number;
+  tokens_total: number;
+  tokens_exact?: boolean;
+  request: {
+    model: string;
+    stream?: boolean;
+    parameters?: Record<string, any>;
+    tools?: string[];
+    messages: Array<{
+      role: string;
+      content?: any;
+      tool_calls?: any;
+      tool_call_id?: string;
+      name?: string;
+    }>;
+  };
+  response: {
+    content?: string;
+    thinking?: string;
+    tool_calls?: any[];
+    error?: string;
+    raw_choices?: any;
+  };
+}
+
 export interface AIModel {
   id: number;
   name: string;
@@ -184,6 +220,7 @@ export interface ChatMessage {
   progress_steps?: ProgressStep[];
   progress_summary?: ProgressSummary;
   x_choices?: ChoicePromptData;
+  debug_traces?: LLMTraceTurn[];
   tokens_used: number;
   latency_ms?: number;
   tokens_per_second?: number;

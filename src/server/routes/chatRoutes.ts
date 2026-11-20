@@ -193,8 +193,9 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
       return res.status(404).json({ error: 'Không tìm thấy cuộc trò chuyện.' });
     }
 
+    const isAdmin = req.user?.role === 'admin';
     const messages = await query(
-      `SELECT id, session_id, sender, content, thinking_content, progress_steps, x_choices, tokens_used, latency_ms, tokens_per_second, created_at
+      `SELECT id, session_id, sender, content, thinking_content, progress_steps, x_choices, debug_traces, tokens_used, latency_ms, tokens_per_second, created_at
        FROM chat_messages WHERE session_id = ? ORDER BY id ASC`,
       [sessionId]
     );
@@ -219,6 +220,16 @@ router.get('/sessions/:id/messages', async (req: CustomRequest, res: Response) =
             }
           })()
         : undefined,
+      debug_traces:
+        isAdmin && m.debug_traces
+          ? (() => {
+              try {
+                return JSON.parse(m.debug_traces);
+              } catch {
+                return undefined;
+              }
+            })()
+          : undefined,
     }));
 
     res.json({ messages: parsedMessages });
@@ -313,10 +324,12 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
   );
 
   const history = await query(
-    `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 10`,
+    `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 20`,
     [currentSessionId]
   );
   history.reverse();
+
+  const isAdmin = req.user?.role === 'admin';
 
   try {
     const userInfo = {
@@ -337,6 +350,10 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
           res.write(`data: ${JSON.stringify({ type: 'progress', step: chunk.step, summary: chunk.summary })}\n\n`);
         } else if (chunk.type === 'choices') {
           res.write(`data: ${JSON.stringify({ type: 'choices', choices: chunk.choices })}\n\n`);
+        } else if (chunk.type === 'debug_trace') {
+          if (isAdmin && chunk.trace) {
+            res.write(`data: ${JSON.stringify({ type: 'debug_trace', trace: chunk.trace })}\n\n`);
+          }
         } else {
           res.write(`data: ${JSON.stringify({ type: chunk.type, text: chunk.text })}\n\n`);
         }
@@ -358,16 +375,17 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       return;
     }
 
-    // Save assistant message to database with thinking content, progress steps, choices & performance metrics
+    // Save assistant message to database with thinking content, progress steps, choices, debug traces & performance metrics
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, debug_traces, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
         aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
         aiResult.x_choices ? JSON.stringify(aiResult.x_choices) : null,
+        aiResult.debug_traces ? JSON.stringify(aiResult.debug_traces) : null,
         aiResult.tokensUsed,
         aiResult.latency_ms,
         aiResult.tokens_per_second
@@ -396,6 +414,7 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       progress_steps: aiResult.progress_steps || undefined,
       progress_summary: aiResult.progress_summary || undefined,
       x_choices: aiResult.x_choices || undefined,
+      debug_traces: isAdmin ? aiResult.debug_traces || undefined : undefined,
       tokens_used: aiResult.tokensUsed,
       latency_ms: aiResult.latency_ms,
       tokens_per_second: aiResult.tokens_per_second,
@@ -494,11 +513,12 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     );
 
     const history = await query(
-      `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 10`,
+      `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 20`,
       [currentSessionId]
     );
     history.reverse();
 
+    const isAdmin = req.user?.role === 'admin';
     const userInfo = {
       name: req.user?.name,
       email: req.user?.email,
@@ -511,14 +531,15 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     const aiResult = await generateAIChatResponse(modelConfig, history, undefined, userInfo, currentSessionId);
 
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, debug_traces, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
         aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
         aiResult.x_choices ? JSON.stringify(aiResult.x_choices) : null,
+        aiResult.debug_traces ? JSON.stringify(aiResult.debug_traces) : null,
         aiResult.tokensUsed,
         aiResult.latency_ms,
         aiResult.tokens_per_second
@@ -549,6 +570,7 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
         progress_steps: aiResult.progress_steps || undefined,
         progress_summary: aiResult.progress_summary || undefined,
         x_choices: aiResult.x_choices || undefined,
+        debug_traces: isAdmin ? aiResult.debug_traces || undefined : undefined,
         tokens_used: aiResult.tokensUsed,
         latency_ms: aiResult.latency_ms,
         tokens_per_second: aiResult.tokens_per_second,

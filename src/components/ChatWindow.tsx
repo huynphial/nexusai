@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from '../types';
+import { ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary, LLMTraceTurn } from '../types';
 import { MarkdownViewer } from './MarkdownViewer';
 import { ChoicePromptBox } from './ChoicePromptBox';
 import { useAuth } from '../context/AuthContext';
@@ -48,6 +48,7 @@ interface Props {
     progress_steps?: ProgressStep[];
     progress_summary?: ProgressSummary;
     x_choices?: import('../types').ChoicePromptData;
+    debug_traces?: LLMTraceTurn[];
   } | null;
   onCancelStream?: () => void;
   onTogglePauseStream?: () => void;
@@ -524,7 +525,11 @@ export const ChatWindow: React.FC<Props> = ({
 
                       {/* Debug Thinking Panel (If enabled for user group / admin) */}
                       {(user?.enable_debug_thinking || user?.role === 'admin') && selectedModel && (
-                        <DebugThinkingPanel model={selectedModel} msg={m} />
+                        <DebugThinkingPanel
+                          model={selectedModel}
+                          msg={m}
+                          isAdmin={user?.role === 'admin'}
+                        />
                       )}
 
                       <MarkdownViewer content={m.content} />
@@ -638,11 +643,13 @@ export const ChatWindow: React.FC<Props> = ({
               {(user?.enable_debug_thinking || user?.role === 'admin') && selectedModel && (
                 <DebugThinkingPanel
                   model={selectedModel}
+                  isAdmin={user?.role === 'admin'}
                   msg={{
                     latency_ms: 0,
                     tokens_per_second: 0,
                     tokens_used: 0,
                     progress_summary: streamingData.progress_summary,
+                    debug_traces: streamingData.debug_traces,
                   }}
                 />
               )}
@@ -815,17 +822,170 @@ const ThinkingBox = ({ thinking, isLive = false }: { thinking: string; isLive?: 
   );
 };
 
+// Expandable per-turn LLM Request / Response trace item (Admin only)
+const TraceTurnItem: React.FC<{ trace: LLMTraceTurn }> = ({ trace }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<'req' | 'res' | null>(null);
+
+  const kindLabel =
+    trace.kind === 'auto_continue'
+      ? 'Auto-Continue ngầm'
+      : trace.kind === 'tool_followup'
+      ? 'Tiếp nối MCP Tool'
+      : trace.kind === 'fallback'
+      ? 'Fallback'
+      : 'Request ban đầu';
+
+  const kindBadgeClass =
+    trace.kind === 'auto_continue'
+      ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25'
+      : trace.kind === 'tool_followup'
+      ? 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/25'
+      : 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25';
+
+  const isStatusOk = trace.status_code !== undefined && trace.status_code >= 200 && trace.status_code < 300;
+  const hasError = Boolean(trace.response?.error) || (trace.status_code !== undefined && !isStatusOk);
+
+  const handleCopyJson = async (type: 'req' | 'res', data: any) => {
+    const ok = await copyTextToClipboard(JSON.stringify(data, null, 2));
+    if (ok) {
+      setCopiedKey(type);
+      setTimeout(() => setCopiedKey((prev) => (prev === type ? null : prev)), 1600);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/70 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-left hover:bg-slate-100/80 dark:hover:bg-slate-800/70 transition-colors cursor-pointer"
+      >
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="font-bold text-slate-700 dark:text-slate-200">Lượt #{trace.turn}</span>
+          <span className={`px-1.5 py-0.2 rounded text-[9.5px] font-semibold border ${kindBadgeClass}`}>
+            {kindLabel}
+          </span>
+          {trace.status_code !== undefined && (
+            <span
+              className={`px-1.5 py-0.2 rounded text-[9.5px] font-semibold border ${
+                hasError
+                  ? 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/25'
+                  : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/25'
+              }`}
+            >
+              {trace.status_code === 0 ? 'NET ERR' : `HTTP ${trace.status_code}`}
+            </span>
+          )}
+          {trace.finish_reason && (
+            <span className="px-1.5 py-0.2 rounded text-[9.5px] bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+              stop: {trace.finish_reason}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 text-[10px]">
+          <span className="px-1.5 py-0.2 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20">
+            IN: <b>{trace.tokens_in.toLocaleString()}</b>
+          </span>
+          <span className="px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+            OUT: <b>{trace.tokens_out.toLocaleString()}</b>
+          </span>
+          <span className="text-slate-500 dark:text-slate-400">
+            {formatDuration(trace.duration_ms)}
+          </span>
+          {expanded ? <ChevronUp className="w-3 h-3 text-slate-400" /> : <ChevronDown className="w-3 h-3 text-slate-400" />}
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="p-2.5 border-t border-slate-200 dark:border-slate-800 space-y-2.5 bg-white dark:bg-slate-950/90 text-[10px]">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-slate-500 dark:text-slate-400">
+            <span>
+              Thời điểm: <b className="text-slate-700 dark:text-slate-300">{new Date(trace.started_at).toLocaleTimeString()}</b>
+              {' · '}Thời lượng: <b className="text-slate-700 dark:text-slate-300">{formatDuration(trace.duration_ms)}</b>
+            </span>
+            <span>
+              Token: IN {trace.tokens_in.toLocaleString()} / OUT {trace.tokens_out.toLocaleString()} / Tổng {trace.tokens_total.toLocaleString()}
+              {' '}({trace.tokens_exact ? 'từ API' : 'ước tính'})
+            </span>
+          </div>
+
+          {trace.endpoint && (
+            <div className="text-slate-500 dark:text-slate-400 truncate">
+              Endpoint: <span className="text-indigo-600 dark:text-indigo-400">{trace.endpoint}</span>
+            </div>
+          )}
+
+          {/* Request Payload */}
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <div className="px-2.5 py-1 bg-slate-100 dark:bg-slate-900 flex items-center justify-between border-b border-slate-200 dark:border-slate-800">
+              <span className="font-semibold text-blue-700 dark:text-blue-400">
+                Request gửi tới AI Model ({trace.request.messages?.length || 0} messages)
+              </span>
+              <button
+                type="button"
+                onClick={() => handleCopyJson('req', trace.request)}
+                className="flex items-center gap-1 text-[9.5px] text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
+              >
+                {copiedKey === 'req' ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                <span>{copiedKey === 'req' ? 'Đã chép' : 'Copy JSON'}</span>
+              </button>
+            </div>
+            <pre className="p-2 max-h-56 overflow-y-auto whitespace-pre-wrap break-all text-slate-700 dark:text-slate-300 leading-relaxed">
+              {JSON.stringify(trace.request, null, 2)}
+            </pre>
+          </div>
+
+          {/* Response Payload */}
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <div className="px-2.5 py-1 bg-slate-100 dark:bg-slate-900 flex items-center justify-between border-b border-slate-200 dark:border-slate-800">
+              <span className={`font-semibold ${hasError ? 'text-red-600 dark:text-red-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                Response trả về từ AI Model
+              </span>
+              <button
+                type="button"
+                onClick={() => handleCopyJson('res', trace.response)}
+                className="flex items-center gap-1 text-[9.5px] text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
+              >
+                {copiedKey === 'res' ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                <span>{copiedKey === 'res' ? 'Đã chép' : 'Copy JSON'}</span>
+              </button>
+            </div>
+            <pre className="p-2 max-h-56 overflow-y-auto whitespace-pre-wrap break-all text-slate-700 dark:text-slate-300 leading-relaxed">
+              {JSON.stringify(trace.response, null, 2)}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Collapsible Debug Thinking Panel for Admins / User Groups with Debug Thinking enabled
 const DebugThinkingPanel = ({
   model,
   msg,
+  isAdmin = false,
 }: {
   model?: ModelWithQuota;
-  msg: { latency_ms?: number; tokens_per_second?: number; tokens_used?: number; progress_summary?: any };
+  isAdmin?: boolean;
+  msg: {
+    latency_ms?: number;
+    tokens_per_second?: number;
+    tokens_used?: number;
+    progress_summary?: any;
+    debug_traces?: LLMTraceTurn[];
+  };
 }) => {
   const [isOpen, setIsOpen] = useState(false);
 
   if (!model) return null;
+
+  const traces = msg.debug_traces || [];
+  const totalIn = traces.reduce((sum, t) => sum + (t.tokens_in || 0), 0);
+  const totalOut = traces.reduce((sum, t) => sum + (t.tokens_out || 0), 0);
+  const totalTraceMs = traces.reduce((sum, t) => sum + (t.duration_ms || 0), 0);
 
   return (
     <div className="mb-2.5 rounded-xl border border-purple-200/80 dark:border-purple-900/60 bg-purple-50/50 dark:bg-purple-950/30 overflow-hidden text-xs transition-all shadow-2xs">
@@ -834,18 +994,23 @@ const DebugThinkingPanel = ({
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center justify-between px-3 py-1.5 text-purple-800 dark:text-purple-300 font-semibold hover:bg-purple-100/50 dark:hover:bg-purple-900/40 transition-colors cursor-pointer text-[11px]"
       >
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
           <Bug className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
-          <span>Thông tin Kỹ thuật Debug (API Models & System Prompt)</span>
+          <span>Thông tin Kỹ thuật Debug (API Models &amp; System Prompt)</span>
+          {isAdmin && traces.length > 0 && (
+            <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-700 dark:text-purple-300 border border-purple-500/20 font-mono">
+              {traces.length} trace · IN {totalIn.toLocaleString()} / OUT {totalOut.toLocaleString()}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-1 text-[10px] text-purple-600 dark:text-purple-400">
+        <div className="flex items-center gap-1 text-[10px] text-purple-600 dark:text-purple-400 shrink-0">
           <span>{isOpen ? 'Thu gọn' : 'Xem Debug'}</span>
           {isOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
         </div>
       </button>
 
       {isOpen && (
-        <div className="p-3 border-t border-purple-200/60 dark:border-purple-900/50 bg-white/70 dark:bg-slate-950/80 font-mono text-[10.5px] space-y-2 text-slate-700 dark:text-slate-300">
+        <div className="p-3 border-t border-purple-200/60 dark:border-purple-900/50 bg-white/70 dark:bg-slate-950/80 font-mono text-[10.5px] space-y-2.5 text-slate-700 dark:text-slate-300">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <div>
               <span className="text-slate-400">Tên mô hình:</span>{' '}
@@ -881,6 +1046,37 @@ const DebugThinkingPanel = ({
               <div className="text-slate-400 font-semibold mb-0.5">System Prompt đã gửi tới API:</div>
               <div className="p-2 rounded bg-slate-100 dark:bg-slate-900/90 text-slate-800 dark:text-slate-200 leading-relaxed max-h-28 overflow-y-auto whitespace-pre-wrap break-all text-[10px]">
                 {model.system_prompt}
+              </div>
+            </div>
+          )}
+
+          {/* Admin-only Request / Response Trace & Token IN/OUT */}
+          {isAdmin && traces.length > 0 && (
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-purple-700 dark:text-purple-300 font-bold text-[10.5px] flex items-center gap-1.5">
+                  <span>Trace Request / Response AI Model ({traces.length} lượt)</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                  <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20">
+                    Token IN: <b>{totalIn.toLocaleString()}</b>
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+                    Token OUT: <b>{totalOut.toLocaleString()}</b>
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20">
+                    Tổng: <b>{(totalIn + totalOut).toLocaleString()}</b>
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                    Thời gian API: <b>{formatDuration(totalTraceMs)}</b>
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                {traces.map((t, idx) => (
+                  <TraceTurnItem key={`${t.turn}-${idx}`} trace={t} />
+                ))}
               </div>
             </div>
           )}

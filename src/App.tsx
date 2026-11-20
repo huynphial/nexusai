@@ -5,7 +5,7 @@ import { Sidebar } from './components/Sidebar';
 import { ChatWindow } from './components/ChatWindow';
 import { LoginModal } from './components/LoginModal';
 import { DashboardMain } from './components/Dashboard/DashboardMain';
-import { ChatSession, ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary } from './types';
+import { ChatSession, ChatMessage, ModelWithQuota, ProgressStep, ProgressSummary, LLMTraceTurn } from './types';
 import { api } from './api';
 import { APP_CONFIG } from './config/appConfig';
 import { Menu } from 'lucide-react';
@@ -160,6 +160,7 @@ function MainContent() {
     progress_steps?: ProgressStep[];
     progress_summary?: ProgressSummary;
     x_choices?: import('./types').ChoicePromptData;
+    debug_traces?: LLMTraceTurn[];
   } | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(true);
   const [isStreamPaused, setIsStreamPaused] = useState(false);
@@ -297,6 +298,7 @@ function MainContent() {
                 progress_steps: currentSteps,
                 progress_summary: chunk.summary || prev?.progress_summary,
                 x_choices: prev?.x_choices,
+                debug_traces: prev?.debug_traces,
               };
             });
           } else if (chunk.type === 'thinking') {
@@ -308,6 +310,7 @@ function MainContent() {
               progress_steps: prev?.progress_steps,
               progress_summary: prev?.progress_summary,
               x_choices: prev?.x_choices,
+              debug_traces: prev?.debug_traces,
             }));
           } else if (chunk.type === 'choices') {
             setStreamingData((prev) => ({
@@ -317,6 +320,17 @@ function MainContent() {
               progress_steps: prev?.progress_steps,
               progress_summary: prev?.progress_summary,
               x_choices: chunk.choices,
+              debug_traces: prev?.debug_traces,
+            }));
+          } else if (chunk.type === 'debug_trace' && chunk.trace) {
+            setStreamingData((prev) => ({
+              content: prev?.content || accumulatedContent,
+              thinking: prev?.thinking || accumulatedThinking,
+              isThinking: prev?.isThinking ?? false,
+              progress_steps: prev?.progress_steps,
+              progress_summary: prev?.progress_summary,
+              x_choices: prev?.x_choices,
+              debug_traces: [...(prev?.debug_traces || []), chunk.trace!],
             }));
           } else {
             accumulatedContent += chunk.text || '';
@@ -327,6 +341,7 @@ function MainContent() {
               progress_steps: prev?.progress_steps,
               progress_summary: prev?.progress_summary,
               x_choices: prev?.x_choices,
+              debug_traces: prev?.debug_traces,
             }));
           }
         },

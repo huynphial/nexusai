@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { logger } from './logger';
 import { getMcpToolBindingsForModel, callMcpTool, McpToolBinding } from './mcpClient';
+import type { LLMTraceTurn } from '../types';
 
 export interface ChatMessageItem {
   role: 'user' | 'assistant' | 'system';
@@ -29,11 +30,12 @@ export interface AIModelConfig {
 }
 
 export interface StreamChunk {
-  type: 'thinking' | 'content' | 'progress' | 'choices';
+  type: 'thinking' | 'content' | 'progress' | 'choices' | 'debug_trace';
   text?: string;
   step?: any;
   summary?: any;
   choices?: any;
+  trace?: LLMTraceTurn;
 }
 
 export interface AIResponse {
@@ -42,6 +44,7 @@ export interface AIResponse {
   progress_steps?: any[];
   progress_summary?: any;
   x_choices?: any;
+  debug_traces?: LLMTraceTurn[];
   tokensUsed: number;
   latency_ms: number;
   tokens_per_second: number;
@@ -73,10 +76,89 @@ export interface UserInfoTracing {
   group_id?: number;
 }
 
-const SILENT_CONTINUE_PROMPT_EMPTY =
-  'continue. Hãy hoàn thành và trả lời đầy đủ nội dung câu hỏi trên bằng ngôn ngữ phù hợp, không để trống câu trả lời.';
-const SILENT_CONTINUE_PROMPT_PARTIAL =
-  'continue. Hãy viết tiếp chính xác từ chỗ bạn vừa dừng lại để hoàn thành câu trả lời, không lặp lại phần đã viết và kết thúc câu đầy đủ.';
+interface ExecutedToolContextItem {
+  tool: string;
+  args: Record<string, any>;
+  resultSnippet: string;
+}
+
+function truncateForTrace(value: any, maxLen = 12000): any {
+  if (typeof value === 'string') {
+    if (value.length <= maxLen) return value;
+    return `${value.slice(0, maxLen)}\n... [truncated ${value.length - maxLen} chars]`;
+  }
+  return value;
+}
+
+function cloneMessagesForTrace(msgs: any[]): Array<{
+  role: string;
+  content?: any;
+  tool_calls?: any;
+  tool_call_id?: string;
+  name?: string;
+}> {
+  return (msgs || []).map((m) => {
+    const out: any = { role: m.role || 'unknown' };
+    if (m.content !== undefined) out.content = truncateForTrace(m.content);
+    if (m.parts !== undefined) {
+      out.content = m.parts.map((p: any) =>
+        p.text !== undefined ? truncateForTrace(p.text) : p
+      );
+    }
+    if (m.tool_calls !== undefined) out.tool_calls = m.tool_calls;
+    if (m.tool_call_id !== undefined) out.tool_call_id = m.tool_call_id;
+    if (m.name !== undefined) out.name = m.name;
+    return out;
+  });
+}
+
+function buildAutoContinuePrompt(params: {
+  isEmptyContent: boolean;
+  accumulatedContent: string;
+  turnThinking?: string;
+  executedToolsContext: ExecutedToolContextItem[];
+  attempt: number;
+}): string {
+  const { isEmptyContent, accumulatedContent, turnThinking, executedToolsContext, attempt } = params;
+  const lines: string[] = [
+    isEmptyContent
+      ? `continue (lượt tự động #${attempt}). Phản hồi trước chưa xuất ra nội dung trả lời.`
+      : `continue (lượt tự động #${attempt}). Câu trả lời trước bị ngắt giữa chừng và chưa kết thúc hoàn chỉnh.`,
+    '',
+    'Yêu cầu xử lý ngữ cảnh:',
+    '1. Đọc kỹ và tái sử dụng toàn bộ ngữ cảnh lịch sử làm việc, nội dung bạn đã phân tích/suy luận và dữ liệu đã được xử lý từ các lượt/tool trước đó.',
+    '2. KHÔNG gọi lại các tool đã thực thi và KHÔNG yêu cầu người dùng cung cấp lại thông tin nếu dữ liệu đã có sẵn trong context phía trên.',
+    '3. CHỈ gọi tool mới hoặc yêu cầu người dùng bổ sung thông tin khi dữ liệu cần thiết hoàn toàn chưa tồn tại trong lịch sử và context đã xử lý.',
+  ];
+
+  if (executedToolsContext.length > 0) {
+    lines.push('', 'Dữ liệu đã xử lý từ các tool ở lượt trước (ưu tiên tái sử dụng):');
+    executedToolsContext.slice(-6).forEach((item, idx) => {
+      lines.push(`- [${idx + 1}] Tool \`${item.tool}\` (args: ${JSON.stringify(item.args)}): ${item.resultSnippet}`);
+    });
+  }
+
+  if (isEmptyContent && turnThinking && turnThinking.trim()) {
+    const cleanThink = turnThinking.trim().slice(-1500);
+    lines.push(
+      '',
+      'Tóm tắt phần suy luận bạn vừa thực hiện ở lượt trước (hãy dùng trực tiếp để viết câu trả lời chính thức):',
+      cleanThink
+    );
+  }
+
+  if (!isEmptyContent && accumulatedContent.trim()) {
+    const tailSnippet = accumulatedContent.trim().slice(-180);
+    lines.push(
+      '',
+      `4. Viết tiếp nối chính xác từ chỗ bạn vừa dừng lại ("...${tailSnippet}"), KHÔNG lặp lại phần đã viết và kết thúc câu trả lời đầy đủ với dấu chấm câu.`
+    );
+  } else {
+    lines.push('', '4. Xuất ngay câu trả lời hoàn chỉnh cho người dùng và kết thúc đầy đủ với dấu chấm câu.');
+  }
+
+  return lines.join('\n');
+}
 
 export function isResponseIncomplete(params: {
   content: string;
@@ -212,6 +294,10 @@ export async function generateAIChatResponse(
       let accumulatedText = '';
       let accumulatedThinking = '';
       const geminiSteps: any[] = [];
+      const geminiTraces: LLMTraceTurn[] = [];
+      const executedToolsContext: ExecutedToolContextItem[] = [];
+      let totalTokensIn = 0;
+      let totalTokensOut = 0;
 
       const modelTemp = typeof modelConfig.temperature === 'number' ? modelConfig.temperature : 0.7;
       const modelTopP = typeof modelConfig.top_p === 'number' ? modelConfig.top_p : 0.95;
@@ -248,9 +334,27 @@ export async function generateAIChatResponse(
           throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
         }
 
+        const turnStart = Date.now();
+        const turnStartedAt = new Date().toISOString();
+        const turnKind: LLMTraceTurn['kind'] = isAutoContinueTurn
+          ? 'auto_continue'
+          : turn > 0
+          ? 'tool_followup'
+          : 'initial';
+
+        const requestSnapshotMessages = [
+          { role: 'system', content: systemPrompt },
+          ...cloneMessagesForTrace(formattedContents),
+        ];
+
         let turnFunctionCalls: Array<{ name: string; args: Record<string, any> }> = [];
         let turnText = '';
+        let turnThinking = '';
         let turnFinishReason = '';
+        let turnTokensIn = 0;
+        let turnTokensOut = 0;
+        let turnTokensTotalReported = 0;
+        let turnTokensExact = false;
         let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedText.length > 0;
 
         const appendGeminiText = (chunkText: string, emitStream: boolean) => {
@@ -289,6 +393,20 @@ export async function generateAIChatResponse(
             if (candidateFinish) {
               turnFinishReason = String(candidateFinish);
             }
+            const um = (chunk as any).usageMetadata;
+            if (um) {
+              if (typeof um.promptTokenCount === 'number') {
+                turnTokensIn = um.promptTokenCount;
+                turnTokensExact = true;
+              }
+              if (typeof um.candidatesTokenCount === 'number' || typeof um.thoughtsTokenCount === 'number') {
+                turnTokensOut = (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0);
+                turnTokensExact = true;
+              }
+              if (typeof um.totalTokenCount === 'number') {
+                turnTokensTotalReported = um.totalTokenCount;
+              }
+            }
             if (Array.isArray(chunk.functionCalls) && chunk.functionCalls.length > 0) {
               for (const fc of chunk.functionCalls) {
                 if (fc.name) {
@@ -305,8 +423,10 @@ export async function generateAIChatResponse(
 
               const extracted = extractThinkingFromContent(accumulatedText + chunkText);
               if (extracted.thinkingContent) {
+                const thinkPiece = chunkText.replace(/<\/?think>/g, '');
+                turnThinking += thinkPiece;
                 accumulatedThinking = extracted.thinkingContent;
-                onChunk({ type: 'thinking', text: chunkText.replace(/<\/?think>/g, '') });
+                onChunk({ type: 'thinking', text: thinkPiece });
               } else {
                 appendGeminiText(chunkText, true);
               }
@@ -324,6 +444,20 @@ export async function generateAIChatResponse(
           if (candidateFinish) {
             turnFinishReason = String(candidateFinish);
           }
+          const um = (res as any).usageMetadata;
+          if (um) {
+            if (typeof um.promptTokenCount === 'number') {
+              turnTokensIn = um.promptTokenCount;
+              turnTokensExact = true;
+            }
+            if (typeof um.candidatesTokenCount === 'number' || typeof um.thoughtsTokenCount === 'number') {
+              turnTokensOut = (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0);
+              turnTokensExact = true;
+            }
+            if (typeof um.totalTokenCount === 'number') {
+              turnTokensTotalReported = um.totalTokenCount;
+            }
+          }
           if (Array.isArray(res.functionCalls) && res.functionCalls.length > 0) {
             for (const fc of res.functionCalls) {
               if (fc.name) {
@@ -335,6 +469,50 @@ export async function generateAIChatResponse(
             appendGeminiText(res.text, false);
           }
         }
+
+        if (!turnTokensExact) {
+          turnTokensIn = Math.ceil(JSON.stringify(requestSnapshotMessages).length / 4);
+          turnTokensOut = Math.ceil(
+            (turnText.length + turnThinking.length + JSON.stringify(turnFunctionCalls).length) / 4
+          );
+        }
+        const turnTokensTotal = turnTokensTotalReported > 0 ? turnTokensTotalReported : turnTokensIn + turnTokensOut;
+        totalTokensIn += turnTokensIn;
+        totalTokensOut += turnTokensOut;
+
+        const geminiTurnTrace: LLMTraceTurn = {
+          turn: turn + 1,
+          kind: turnKind,
+          provider: modelConfig.provider,
+          model: modelName,
+          endpoint: `gemini://${modelName}`,
+          started_at: turnStartedAt,
+          duration_ms: Date.now() - turnStart,
+          status_code: 200,
+          finish_reason: turnFinishReason || undefined,
+          tokens_in: turnTokensIn,
+          tokens_out: turnTokensOut,
+          tokens_total: turnTokensTotal,
+          tokens_exact: turnTokensExact,
+          request: {
+            model: modelName,
+            stream: !!isStreamWanted,
+            parameters: {
+              temperature: modelTemp,
+              top_p: modelTopP,
+              ...(modelMaxTokens ? { max_tokens: modelMaxTokens } : {}),
+            },
+            tools: mcpBindings.map((b) => b.qualifiedName),
+            messages: requestSnapshotMessages,
+          },
+          response: {
+            ...(turnThinking ? { thinking: turnThinking } : {}),
+            ...(turnText ? { content: turnText } : {}),
+            ...(turnFunctionCalls.length > 0 ? { tool_calls: turnFunctionCalls } : {}),
+          },
+        };
+        geminiTraces.push(geminiTurnTrace);
+        if (onChunk) onChunk({ type: 'debug_trace', trace: geminiTurnTrace });
 
         if (turnFunctionCalls.length === 0) {
           if (
@@ -353,12 +531,18 @@ export async function generateAIChatResponse(
                 'AIProvider',
                 `[Auto-Continue #${autoContinueCount}] Gemini "${modelName}" ended incomplete (${check.reason}). Sending silent continue prompt.`
               );
+              const isEmptyContent = turnText.trim().length === 0 && accumulatedText.trim().length === 0;
               if (turnText.trim().length > 0) {
                 formattedContents.push({ role: 'model', parts: [{ text: turnText }] });
-                formattedContents.push({ role: 'user', parts: [{ text: SILENT_CONTINUE_PROMPT_PARTIAL }] });
-              } else {
-                formattedContents.push({ role: 'user', parts: [{ text: SILENT_CONTINUE_PROMPT_EMPTY }] });
               }
+              const continuePrompt = buildAutoContinuePrompt({
+                isEmptyContent,
+                accumulatedContent: accumulatedText,
+                turnThinking,
+                executedToolsContext,
+                attempt: autoContinueCount,
+              });
+              formattedContents.push({ role: 'user', parts: [{ text: continuePrompt }] });
               continue;
             }
           }
@@ -419,6 +603,12 @@ export async function generateAIChatResponse(
               };
           const toolMs = Date.now() - t0;
 
+          executedToolsContext.push({
+            tool: toolName,
+            args: fc.args || {},
+            resultSnippet: toolResult.text.slice(0, 600),
+          });
+
           const doneStep = {
             ...runningStep,
             status: toolResult.isError ? 'error' : 'done',
@@ -463,8 +653,7 @@ export async function generateAIChatResponse(
       const finalContent = extracted.cleanContent;
       const finalThinking = accumulatedThinking || extracted.thinkingContent;
 
-      const promptLength = messages.reduce((acc, m) => acc + m.content.length, 0) + systemPrompt.length;
-      const totalTokens = Math.ceil((promptLength + accumulatedText.length) / 4);
+      const totalTokens = totalTokensIn + totalTokensOut;
       const tokensPerSecond = latencyMs > 0 ? Number(((totalTokens / (latencyMs / 1000))).toFixed(1)) : 0;
 
       logger.apiDebug('GeminiSDK', `gemini://${modelName}`, { model: modelName }, 200, { tokens: totalTokens, latency: latencyMs }, latencyMs);
@@ -473,6 +662,7 @@ export async function generateAIChatResponse(
         content: finalContent,
         thinking_content: allowThinking ? finalThinking : undefined,
         progress_steps: geminiSteps.length > 0 ? geminiSteps : undefined,
+        debug_traces: geminiTraces.length > 0 ? geminiTraces : undefined,
         tokensUsed: totalTokens,
         latency_ms: latencyMs,
         tokens_per_second: tokensPerSecond,
@@ -581,12 +771,17 @@ export async function generateAIChatResponse(
 
       const conversationMessages: any[] = [...fullMessages];
       let toolsEnabledForRequest = openAiTools.length > 0;
+      let streamOptionsSupported = true;
 
       let accumulatedContent = '';
       let accumulatedThinking = '';
       const accumulatedSteps: any[] = [];
+      const debugTraces: LLMTraceTurn[] = [];
+      const executedToolsContext: ExecutedToolContextItem[] = [];
       let accumulatedSummary: any = null;
       let accumulatedChoices: any = undefined;
+      let totalTokensIn = 0;
+      let totalTokensOut = 0;
       let reportedTotalTokens = 0;
 
       const MAX_TOOL_TURNS = 6;
@@ -598,6 +793,15 @@ export async function generateAIChatResponse(
         if (abortController.signal.aborted) {
           throw new Error(externalSignal?.aborted ? 'CLIENT_ABORTED' : `Timeout: Quá thời gian phản hồi tối đa (${timeoutSeconds}s)`);
         }
+
+        const turnStart = Date.now();
+        const turnStartedAt = new Date().toISOString();
+        const turnKind: LLMTraceTurn['kind'] = isAutoContinueTurn
+          ? 'auto_continue'
+          : turn > 0
+          ? 'tool_followup'
+          : 'initial';
+
         const requestPayload: any = {
           model: modelId,
           messages: conversationMessages,
@@ -620,6 +824,9 @@ export async function generateAIChatResponse(
           if (modelMaxTokens > 0) requestPayload.max_tokens = modelMaxTokens;
           if (modelPresence !== 0) requestPayload.presence_penalty = modelPresence;
           if (modelFrequency !== 0) requestPayload.frequency_penalty = modelFrequency;
+          if (isStreamWanted && !isStepProgress && streamOptionsSupported) {
+            requestPayload.stream_options = { include_usage: true };
+          }
           if (allowThinking) {
             requestPayload.think = true;
           } else if (!baseUrl.includes('api.openai.com')) {
@@ -640,6 +847,18 @@ export async function generateAIChatResponse(
         if (userInfo?.id !== undefined && userInfo?.id !== null) {
           requestPayload.user_id = userInfo.id;
         }
+
+        const requestSnapshotMessages = cloneMessagesForTrace(conversationMessages);
+        const requestSnapshotParams: Record<string, any> = isOllamaNative
+          ? { ...(requestPayload.options || {}), think: requestPayload.think }
+          : {
+              temperature: requestPayload.temperature,
+              top_p: requestPayload.top_p,
+              ...(requestPayload.max_tokens ? { max_tokens: requestPayload.max_tokens } : {}),
+              ...(requestPayload.presence_penalty ? { presence_penalty: requestPayload.presence_penalty } : {}),
+              ...(requestPayload.frequency_penalty ? { frequency_penalty: requestPayload.frequency_penalty } : {}),
+              ...(requestPayload.think !== undefined ? { think: requestPayload.think } : {}),
+            };
 
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
@@ -691,11 +910,43 @@ export async function generateAIChatResponse(
               abortController.signal
             );
           }
+          const errTrace: LLMTraceTurn = {
+            turn: turn + 1,
+            kind: turnKind,
+            provider: modelConfig.provider,
+            model: modelId,
+            endpoint: endpointUrl,
+            started_at: turnStartedAt,
+            duration_ms: Date.now() - turnStart,
+            status_code: 0,
+            tokens_in: Math.ceil(JSON.stringify(requestSnapshotMessages).length / 4),
+            tokens_out: 0,
+            tokens_total: Math.ceil(JSON.stringify(requestSnapshotMessages).length / 4),
+            tokens_exact: false,
+            request: {
+              model: modelId,
+              stream: !!isStreamWanted,
+              parameters: requestSnapshotParams,
+              tools: toolsEnabledForRequest ? openAiTools.map((t) => t.function.name) : [],
+              messages: requestSnapshotMessages,
+            },
+            response: {
+              error: fetchErr.message || 'Fetch failed',
+            },
+          };
+          debugTraces.push(errTrace);
+          if (onChunk) onChunk({ type: 'debug_trace', trace: errTrace });
           throw fetchErr;
         }
 
         if (!response.ok) {
           const errText = await response.text();
+          // Graceful fallback if upstream endpoint doesn't support `stream_options`
+          if (streamOptionsSupported && response.status === 400 && /stream_options|unknown/i.test(errText)) {
+            logger.warn('AIProvider', `Endpoint rejected stream_options (${errText.slice(0, 120)}). Retrying without stream_options.`);
+            streamOptionsSupported = false;
+            continue;
+          }
           // Graceful fallback if Ollama/upstream model doesn't support `tools`
           if (toolsEnabledForRequest && response.status === 400 && /tool|function/i.test(errText)) {
             logger.warn('AIProvider', `Model "${modelId}" rejected tools parameter (${errText.slice(0, 150)}). Retrying without MCP tools.`);
@@ -716,11 +967,43 @@ export async function generateAIChatResponse(
               abortController.signal
             );
           }
+
+          const httpErrTrace: LLMTraceTurn = {
+            turn: turn + 1,
+            kind: turnKind,
+            provider: modelConfig.provider,
+            model: modelId,
+            endpoint: endpointUrl,
+            started_at: turnStartedAt,
+            duration_ms: Date.now() - turnStart,
+            status_code: response.status,
+            tokens_in: Math.ceil(JSON.stringify(requestSnapshotMessages).length / 4),
+            tokens_out: 0,
+            tokens_total: Math.ceil(JSON.stringify(requestSnapshotMessages).length / 4),
+            tokens_exact: false,
+            request: {
+              model: modelId,
+              stream: !!isStreamWanted,
+              parameters: requestSnapshotParams,
+              tools: toolsEnabledForRequest ? openAiTools.map((t) => t.function.name) : [],
+              messages: requestSnapshotMessages,
+            },
+            response: {
+              error: `HTTP ${response.status}: ${errText}`,
+            },
+          };
+          debugTraces.push(httpErrTrace);
+          if (onChunk) onChunk({ type: 'debug_trace', trace: httpErrTrace });
           throw new Error(`HTTP ${response.status}: ${errText}`);
         }
 
         let turnContent = '';
+        let turnThinking = '';
         let turnFinishReason = '';
+        let turnTokensIn = 0;
+        let turnTokensOut = 0;
+        let turnTokensTotalReported = 0;
+        let turnTokensExact = false;
         let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedContent.length > 0;
         const turnToolCallMap = new Map<
           number,
@@ -770,6 +1053,7 @@ export async function generateAIChatResponse(
                 if (closeIdx !== -1) {
                   const thinkPart = tagBuffer.slice(0, closeIdx);
                   if (thinkPart && allowThinking) {
+                    turnThinking += thinkPart;
                     accumulatedThinking += thinkPart;
                     onChunk({ type: 'thinking', text: thinkPart });
                   }
@@ -781,6 +1065,7 @@ export async function generateAIChatResponse(
                   if (safeLen > 0) {
                     const thinkPart = tagBuffer.slice(0, safeLen);
                     if (allowThinking) {
+                      turnThinking += thinkPart;
                       accumulatedThinking += thinkPart;
                       onChunk({ type: 'thinking', text: thinkPart });
                     }
@@ -822,16 +1107,34 @@ export async function generateAIChatResponse(
             try {
               const parsed = JSON.parse(jsonStr);
 
-              // Track reported token counts and finish/done reason if available
+              // Track reported token counts (in/out/total) and finish/done reason if available
               if (parsed.choices?.[0]?.finish_reason) {
                 turnFinishReason = String(parsed.choices[0].finish_reason);
               } else if (parsed.done_reason) {
                 turnFinishReason = String(parsed.done_reason);
               }
-              if (typeof parsed.usage?.total_tokens === 'number') {
-                reportedTotalTokens += parsed.usage.total_tokens;
+              if (parsed.usage && typeof parsed.usage === 'object') {
+                if (typeof parsed.usage.prompt_tokens === 'number') {
+                  turnTokensIn = parsed.usage.prompt_tokens;
+                  turnTokensExact = true;
+                }
+                if (typeof parsed.usage.completion_tokens === 'number') {
+                  turnTokensOut = parsed.usage.completion_tokens;
+                  turnTokensExact = true;
+                }
+                if (typeof parsed.usage.total_tokens === 'number') {
+                  turnTokensTotalReported = parsed.usage.total_tokens;
+                }
               } else if (typeof parsed.eval_count === 'number' || typeof parsed.prompt_eval_count === 'number') {
-                reportedTotalTokens += (parsed.prompt_eval_count || 0) + (parsed.eval_count || 0);
+                if (typeof parsed.prompt_eval_count === 'number') {
+                  turnTokensIn = parsed.prompt_eval_count;
+                  turnTokensExact = true;
+                }
+                if (typeof parsed.eval_count === 'number') {
+                  turnTokensOut = parsed.eval_count;
+                  turnTokensExact = true;
+                }
+                turnTokensTotalReported = (parsed.prompt_eval_count || 0) + (parsed.eval_count || 0);
               }
 
               // A. Check if the parsed chunk itself is a choices event
@@ -928,6 +1231,7 @@ export async function generateAIChatResponse(
                 '';
 
               if (typeof reasoningText === 'string' && reasoningText.length > 0 && allowThinking) {
+                turnThinking += reasoningText;
                 accumulatedThinking += reasoningText;
                 onChunk({ type: 'thinking', text: reasoningText });
               }
@@ -979,6 +1283,7 @@ export async function generateAIChatResponse(
           if (tagBuffer.length > 0) {
             if (inThinkingTag) {
               if (allowThinking) {
+                turnThinking += tagBuffer;
                 accumulatedThinking += tagBuffer;
                 onChunk({ type: 'thinking', text: tagBuffer });
               }
@@ -1001,10 +1306,28 @@ export async function generateAIChatResponse(
             data.reasoning ||
             '';
 
-          if (typeof data.usage?.total_tokens === 'number') {
-            reportedTotalTokens += data.usage.total_tokens;
+          if (data.usage && typeof data.usage === 'object') {
+            if (typeof data.usage.prompt_tokens === 'number') {
+              turnTokensIn = data.usage.prompt_tokens;
+              turnTokensExact = true;
+            }
+            if (typeof data.usage.completion_tokens === 'number') {
+              turnTokensOut = data.usage.completion_tokens;
+              turnTokensExact = true;
+            }
+            if (typeof data.usage.total_tokens === 'number') {
+              turnTokensTotalReported = data.usage.total_tokens;
+            }
           } else if (typeof data.eval_count === 'number' || typeof data.prompt_eval_count === 'number') {
-            reportedTotalTokens += (data.prompt_eval_count || 0) + (data.eval_count || 0);
+            if (typeof data.prompt_eval_count === 'number') {
+              turnTokensIn = data.prompt_eval_count;
+              turnTokensExact = true;
+            }
+            if (typeof data.eval_count === 'number') {
+              turnTokensOut = data.eval_count;
+              turnTokensExact = true;
+            }
+            turnTokensTotalReported = (data.prompt_eval_count || 0) + (data.eval_count || 0);
           }
 
           if (Array.isArray(messageObj?.tool_calls)) {
@@ -1031,8 +1354,10 @@ export async function generateAIChatResponse(
               accumulatedContent += (accumulatedContent ? '\n' : '') + turnContent;
             }
           }
-          if (reasoningContent || extracted.thinkingContent) {
-            accumulatedThinking += (accumulatedThinking ? '\n' : '') + (reasoningContent || extracted.thinkingContent || '');
+          const combinedTurnThinking = reasoningContent || extracted.thinkingContent || '';
+          if (combinedTurnThinking) {
+            turnThinking = combinedTurnThinking;
+            accumulatedThinking += (accumulatedThinking ? '\n' : '') + combinedTurnThinking;
           }
 
           if (data.x_choices) {
@@ -1050,6 +1375,58 @@ export async function generateAIChatResponse(
 
         // Check if the model requested any MCP tool calls in this turn
         const pendingToolCalls = Array.from(turnToolCallMap.values()).filter((tc) => tc.name.trim().length > 0);
+
+        // Finalize turn token IN / OUT stats & emit trace
+        if (!turnTokensExact) {
+          turnTokensIn = Math.ceil(JSON.stringify(requestSnapshotMessages).length / 4);
+          turnTokensOut = Math.ceil(
+            (turnContent.length + turnThinking.length + JSON.stringify(pendingToolCalls).length) / 4
+          );
+        }
+        const turnTokensTotal = turnTokensTotalReported > 0 ? turnTokensTotalReported : turnTokensIn + turnTokensOut;
+        totalTokensIn += turnTokensIn;
+        totalTokensOut += turnTokensOut;
+        reportedTotalTokens += turnTokensTotal;
+
+        const turnTrace: LLMTraceTurn = {
+          turn: turn + 1,
+          kind: turnKind,
+          provider: modelConfig.provider,
+          model: modelId,
+          endpoint: endpointUrl,
+          started_at: turnStartedAt,
+          duration_ms: Date.now() - turnStart,
+          status_code: response.status,
+          finish_reason: turnFinishReason || undefined,
+          tokens_in: turnTokensIn,
+          tokens_out: turnTokensOut,
+          tokens_total: turnTokensTotal,
+          tokens_exact: turnTokensExact,
+          request: {
+            model: modelId,
+            stream: !!isStreamWanted,
+            parameters: requestSnapshotParams,
+            tools: toolsEnabledForRequest ? openAiTools.map((t) => t.function.name) : [],
+            messages: requestSnapshotMessages,
+          },
+          response: {
+            ...(turnThinking ? { thinking: turnThinking } : {}),
+            ...(turnContent ? { content: turnContent } : {}),
+            ...(pendingToolCalls.length > 0
+              ? {
+                  tool_calls: pendingToolCalls.map((tc) => ({
+                    id: tc.id,
+                    name: tc.name,
+                    arguments: tc.argumentsObj || tc.argumentsStr,
+                  })),
+                }
+              : {}),
+            ...(accumulatedChoices ? { raw_choices: accumulatedChoices } : {}),
+          },
+        };
+        debugTraces.push(turnTrace);
+        if (onChunk) onChunk({ type: 'debug_trace', trace: turnTrace });
+
         if (pendingToolCalls.length === 0 || !toolsEnabledForRequest) {
           if (
             autoContinueEnabled &&
@@ -1068,12 +1445,18 @@ export async function generateAIChatResponse(
                 'AIProvider',
                 `[Auto-Continue #${autoContinueCount}] Model "${modelConfig.name}" ended incomplete (${check.reason}). Sending silent continue prompt.`
               );
+              const isEmptyContent = turnContent.trim().length === 0 && accumulatedContent.trim().length === 0;
               if (turnContent.trim().length > 0) {
                 conversationMessages.push({ role: 'assistant', content: turnContent });
-                conversationMessages.push({ role: 'user', content: SILENT_CONTINUE_PROMPT_PARTIAL });
-              } else {
-                conversationMessages.push({ role: 'user', content: SILENT_CONTINUE_PROMPT_EMPTY });
               }
+              const continuePrompt = buildAutoContinuePrompt({
+                isEmptyContent,
+                accumulatedContent,
+                turnThinking,
+                executedToolsContext,
+                attempt: autoContinueCount,
+              });
+              conversationMessages.push({ role: 'user', content: continuePrompt });
               continue;
             }
           }
@@ -1170,6 +1553,12 @@ export async function generateAIChatResponse(
               };
           const toolMs = Date.now() - t0;
 
+          executedToolsContext.push({
+            tool: toolName,
+            args: tc.parsedArgs || {},
+            resultSnippet: toolResult.text.slice(0, 600),
+          });
+
           const doneStep = {
             ...runningStep,
             status: toolResult.isError ? 'error' : 'done',
@@ -1215,7 +1604,7 @@ export async function generateAIChatResponse(
       const totalTokens =
         reportedTotalTokens > 0
           ? reportedTotalTokens
-          : Math.ceil((JSON.stringify(fullMessages).length + accumulatedContent.length + accumulatedThinking.length) / 4);
+          : totalTokensIn + totalTokensOut;
       const tokensPerSecond = latencyMs > 0 ? Number(((totalTokens / (latencyMs / 1000))).toFixed(1)) : 0;
 
       return {
@@ -1224,6 +1613,7 @@ export async function generateAIChatResponse(
         progress_steps: accumulatedSteps.length > 0 ? accumulatedSteps : undefined,
         progress_summary: accumulatedSummary || undefined,
         x_choices: accumulatedChoices || undefined,
+        debug_traces: debugTraces.length > 0 ? debugTraces : undefined,
         tokensUsed: totalTokens,
         latency_ms: latencyMs,
         tokens_per_second: tokensPerSecond,

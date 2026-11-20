@@ -132,11 +132,12 @@ export const api = {
     data: { session_id?: number; model_id?: number; prompt: string; enable_thinking?: boolean },
     callbacks: {
       onChunk: (chunk: {
-        type: 'thinking' | 'content' | 'progress' | 'choices';
+        type: 'thinking' | 'content' | 'progress' | 'choices' | 'debug_trace';
         text?: string;
         step?: ProgressStep;
         summary?: ProgressSummary;
         choices?: import('./types').ChoicePromptData;
+        trace?: import('./types').LLMTraceTurn;
       }) => void;
       onDone: (res: { session_id: number; message: ChatMessage; updated_quota?: any }) => void;
       onError: (err: string) => void;
@@ -202,7 +203,8 @@ export const api = {
                 parsed.type === 'thinking' ||
                 parsed.type === 'content' ||
                 parsed.type === 'progress' ||
-                parsed.type === 'choices'
+                parsed.type === 'choices' ||
+                parsed.type === 'debug_trace'
               ) {
                 callbacks.onChunk(parsed);
               } else if (parsed.type === 'done') {

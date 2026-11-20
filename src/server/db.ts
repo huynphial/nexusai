@@ -228,6 +228,7 @@ export async function initDatabase() {
         content TEXT NOT NULL,
         thinking_content TEXT,
         x_choices TEXT,
+        debug_traces TEXT,
         tokens_used INTEGER DEFAULT 0,
         latency_ms INTEGER DEFAULT 0,
         tokens_per_second REAL DEFAULT 0,
@@ -317,6 +318,9 @@ export async function initDatabase() {
       }
       if (!msgColNames.includes('progress_steps')) {
         await run(`ALTER TABLE chat_messages ADD COLUMN progress_steps TEXT`);
+      }
+      if (!msgColNames.includes('debug_traces')) {
+        await run(`ALTER TABLE chat_messages ADD COLUMN debug_traces TEXT`);
       }
 
       const groupCols = await query(`PRAGMA table_info(user_groups)`);
