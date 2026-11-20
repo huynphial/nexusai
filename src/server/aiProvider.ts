@@ -138,6 +138,145 @@ function seedHistoricalToolsContext(msgs: ChatMessageItem[]): ExecutedToolContex
   return seeded;
 }
 
+function sanitizeToolParametersSchema(schema: any): Record<string, any> {
+  if (!schema || typeof schema !== 'object') {
+    return { type: 'object', properties: {} };
+  }
+
+  const rootDefs: Record<string, any> = {
+    ...(typeof schema.$defs === 'object' && schema.$defs ? schema.$defs : {}),
+    ...(typeof schema.definitions === 'object' && schema.definitions ? schema.definitions : {}),
+  };
+
+  const resolveRef = (ref: string, visited: Set<string>): any => {
+    if (typeof ref !== 'string' || visited.has(ref)) return null;
+    const match = /^#\/(?:\$defs|definitions)\/(.+)$/.exec(ref);
+    if (!match) return null;
+    const key = match[1];
+    return rootDefs[key] || null;
+  };
+
+  const cleanNode = (node: any, visited = new Set<string>()): any => {
+    if (!node || typeof node !== 'object') return node;
+    if (Array.isArray(node)) {
+      return node.map((item) => cleanNode(item, visited));
+    }
+
+    let working = { ...node };
+    if (typeof working.$ref === 'string') {
+      const resolved = resolveRef(working.$ref, visited);
+      if (resolved && typeof resolved === 'object') {
+        const nextVisited = new Set(visited);
+        nextVisited.add(working.$ref);
+        const { $ref, ...rest } = working;
+        working = { ...resolved, ...rest };
+        return cleanNode(working, nextVisited);
+      }
+    }
+
+    // Simplify Pydantic/JSON Schema nullable unions (anyOf / oneOf with type: "null")
+    for (const unionKey of ['anyOf', 'oneOf'] as const) {
+      if (Array.isArray(working[unionKey])) {
+        const branches = working[unionKey].filter(
+          (b: any) => !(b && typeof b === 'object' && b.type === 'null' && Object.keys(b).length === 1)
+        );
+        if (branches.length === 1 && typeof branches[0] === 'object') {
+          const desc = working.description;
+          const cleanedBranch = cleanNode(branches[0], visited);
+          if (desc && !cleanedBranch.description) {
+            cleanedBranch.description = desc;
+          }
+          return cleanedBranch;
+        }
+      }
+    }
+
+    const strippedKeys = new Set([
+      '$schema',
+      '$id',
+      '$defs',
+      'definitions',
+      '$ref',
+      'additionalProperties',
+      'default',
+      'title',
+      'examples',
+      'readOnly',
+      'writeOnly',
+      'exclusiveMinimum',
+      'exclusiveMaximum',
+      'propertyNames',
+      'patternProperties',
+      'unevaluatedProperties',
+    ]);
+
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(working)) {
+      if (strippedKeys.has(k) || v === undefined) continue;
+      if (k === 'type' && Array.isArray(v)) {
+        const nonNull = v.find((t) => t !== 'null');
+        out.type = nonNull || 'string';
+      } else if (k === 'properties' && v && typeof v === 'object' && !Array.isArray(v)) {
+        const cleanProps: Record<string, any> = {};
+        for (const [pk, pv] of Object.entries(v)) {
+          cleanProps[pk] = cleanNode(pv, visited);
+        }
+        out.properties = cleanProps;
+      } else if (k === 'items' && v && typeof v === 'object') {
+        out.items = cleanNode(v, visited);
+      } else if ((k === 'anyOf' || k === 'oneOf' || k === 'allOf') && Array.isArray(v)) {
+        out[k] = v.map((branch) => cleanNode(branch, visited));
+      } else {
+        out[k] = v;
+      }
+    }
+
+    if (out.type === 'object') {
+      if (!out.properties || typeof out.properties !== 'object') {
+        out.properties = {};
+      }
+      if (Array.isArray(out.required)) {
+        const propKeys = new Set(Object.keys(out.properties));
+        const filteredReq = out.required.filter((r: any) => typeof r === 'string' && propKeys.has(r));
+        if (filteredReq.length > 0) out.required = filteredReq;
+        else delete out.required;
+      }
+    }
+
+    return out;
+  };
+
+  const cleaned = cleanNode(schema);
+  if (!cleaned || typeof cleaned !== 'object') {
+    return { type: 'object', properties: {} };
+  }
+  if (!cleaned.type) {
+    cleaned.type = 'object';
+  }
+  if (cleaned.type === 'object' && (!cleaned.properties || typeof cleaned.properties !== 'object')) {
+    cleaned.properties = {};
+  }
+  return cleaned;
+}
+
+function normalizeOpenAIHistoryMessages(
+  rawMessages: Array<{ role: string; content: string }>
+): Array<{ role: string; content: string }> {
+  const normalized: Array<{ role: string; content: string }> = [];
+  for (const msg of rawMessages) {
+    const content = typeof msg.content === 'string' ? msg.content.trim() : '';
+    if (!content) continue;
+    const prev = normalized[normalized.length - 1];
+    if (prev && prev.role === msg.role) {
+      prev.content = `${prev.content}\n\n${content}`;
+    } else {
+      normalized.push({ role: msg.role, content });
+    }
+  }
+  return normalized;
+}
+
+
 function computeTurnSpeedMetrics(params: {
   durationMs: number;
   ttftMs?: number;
@@ -388,6 +527,8 @@ export async function generateAIChatResponse(
     }
   }
 
+  const debugTraces: LLMTraceTurn[] = [];
+
   try {
     if (modelConfig.provider === 'gemini') {
       // 1. Gemini Server-Side Execution (with optional MCP Function Calling)
@@ -407,10 +548,21 @@ export async function generateAIChatResponse(
         },
       });
 
-      const formattedContents: any[] = messages.map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: formatHistoryMessageContent(m) }],
-      }));
+      const formattedContents: any[] = messages
+        .map((m) => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          text: formatHistoryMessageContent(m).trim(),
+        }))
+        .filter((m) => m.text.length > 0)
+        .reduce((acc: any[], item) => {
+          const prev = acc[acc.length - 1];
+          if (prev && prev.role === item.role && prev.parts?.[0]?.text) {
+            prev.parts[0].text = `${prev.parts[0].text}\n\n${item.text}`;
+          } else {
+            acc.push({ role: item.role, parts: [{ text: item.text }] });
+          }
+          return acc;
+        }, []);
       if (formattedContents.length === 0) {
         formattedContents.push({ role: 'user', parts: [{ text: 'Xin chào' }] });
       }
@@ -418,7 +570,6 @@ export async function generateAIChatResponse(
       let accumulatedText = '';
       let accumulatedThinking = '';
       const geminiSteps: any[] = [];
-      const geminiTraces: LLMTraceTurn[] = [];
       const toolContextEntries: ToolContextEntry[] = [];
       const executedToolsContext: ExecutedToolContextItem[] = seedHistoricalToolsContext(messages);
       let totalTokensIn = 0;
@@ -443,7 +594,7 @@ export async function generateAIChatResponse(
             functionDeclarations: mcpBindings.map((b) => ({
               name: b.qualifiedName,
               description: b.description,
-              parametersJsonSchema: b.inputSchema || { type: 'object', properties: {} },
+              parametersJsonSchema: sanitizeToolParametersSchema(b.inputSchema),
             })),
           },
         ];
@@ -671,7 +822,7 @@ export async function generateAIChatResponse(
             ...(turnFunctionCalls.length > 0 ? { tool_calls: turnFunctionCalls } : {}),
           },
         };
-        geminiTraces.push(geminiTurnTrace);
+        debugTraces.push(geminiTurnTrace);
         if (onChunk) onChunk({ type: 'debug_trace', trace: geminiTurnTrace });
 
         if (turnFunctionCalls.length === 0) {
@@ -832,7 +983,7 @@ export async function generateAIChatResponse(
         thinking_content: allowThinking ? finalThinking : undefined,
         tool_context: toolContextEntries.length > 0 ? toolContextEntries : undefined,
         progress_steps: geminiSteps.length > 0 ? geminiSteps : undefined,
-        debug_traces: geminiTraces.length > 0 ? geminiTraces : undefined,
+        debug_traces: debugTraces.length > 0 ? debugTraces : undefined,
         tokensUsed: totalTokens,
         latency_ms: latencyMs,
         tokens_per_second: tokensPerSecond,
@@ -845,12 +996,15 @@ export async function generateAIChatResponse(
       const apiToken = modelConfig.api_token || process.env.OPENAI_API_KEY || '';
       const modelId = modelConfig.model_identifier || (isStepProgress ? 'qwen3:8b' : 'gpt-4o');
 
-      const fullMessages: Array<{ role: string; content: string }> = [
-        { role: 'system', content: effectiveSystemPrompt },
-        ...messages.map((m) => ({
+      const normalizedHistory = normalizeOpenAIHistoryMessages(
+        messages.map((m) => ({
           role: m.role,
           content: formatHistoryMessageContent(m),
-        })),
+        }))
+      );
+      const fullMessages: Array<{ role: string; content: string }> = [
+        { role: 'system', content: effectiveSystemPrompt },
+        ...normalizedHistory,
       ];
 
       // If step_progress and no API token provided, or if test mode
@@ -938,23 +1092,24 @@ export async function generateAIChatResponse(
         function: {
           name: b.qualifiedName,
           description: b.description,
-          parameters: b.inputSchema || { type: 'object', properties: {} },
+          parameters: sanitizeToolParametersSchema(b.inputSchema),
         },
       }));
 
       const isStrictOpenAICloud = /(api\.openai\.com|googleapis\.com|openai\.azure\.com|api\.groq\.com|api\.mistral\.ai|api\.x\.ai|openrouter\.ai|api\.together\.xyz|api\.deepseek\.com)/i.test(baseUrl);
+      const isNativeOpenAIHost = /(^|\/\/)api\.openai\.com/i.test(baseUrl);
       const isCustomGateway = isStepProgress || modelConfig.provider === 'custom';
 
       const conversationMessages: any[] = [...fullMessages];
       let toolsEnabledForRequest = openAiTools.length > 0;
       let streamOptionsSupported = true;
+      let penaltiesSupported = true;
       let thinkSupported = isOllamaNative || isCustomGateway || !isStrictOpenAICloud;
       let customFieldsSupported = isCustomGateway;
 
       let accumulatedContent = '';
       let accumulatedThinking = '';
       const accumulatedSteps: any[] = [];
-      const debugTraces: LLMTraceTurn[] = [];
       const toolContextEntries: ToolContextEntry[] = [];
       const executedToolsContext: ExecutedToolContextItem[] = seedHistoricalToolsContext(messages);
       let accumulatedSummary: any = null;
@@ -993,8 +1148,8 @@ export async function generateAIChatResponse(
             top_p: modelTopP,
           };
           if (modelMaxTokens > 0) ollamaOpts.num_predict = modelMaxTokens;
-          if (modelPresence !== 0) ollamaOpts.presence_penalty = modelPresence;
-          if (modelFrequency !== 0) ollamaOpts.frequency_penalty = modelFrequency;
+          if (penaltiesSupported && modelPresence !== 0) ollamaOpts.presence_penalty = modelPresence;
+          if (penaltiesSupported && modelFrequency !== 0) ollamaOpts.frequency_penalty = modelFrequency;
           requestPayload.options = ollamaOpts;
           if (thinkSupported) {
             requestPayload.think = allowThinking;
@@ -1003,8 +1158,8 @@ export async function generateAIChatResponse(
           requestPayload.temperature = modelTemp;
           requestPayload.top_p = modelTopP;
           if (modelMaxTokens > 0) requestPayload.max_tokens = modelMaxTokens;
-          if (modelPresence !== 0) requestPayload.presence_penalty = modelPresence;
-          if (modelFrequency !== 0) requestPayload.frequency_penalty = modelFrequency;
+          if (penaltiesSupported && modelPresence !== 0) requestPayload.presence_penalty = modelPresence;
+          if (penaltiesSupported && modelFrequency !== 0) requestPayload.frequency_penalty = modelFrequency;
           if (isStreamWanted && !isStepProgress && streamOptionsSupported) {
             requestPayload.stream_options = { include_usage: true };
           }
@@ -1122,7 +1277,7 @@ export async function generateAIChatResponse(
 
         if (!response.ok) {
           const errText = await response.text();
-          // Graceful fallback if upstream endpoint rejects non-standard fields (think, session_id, user_id, stream_options, tools)
+          // Graceful fallback if upstream endpoint rejects optional/non-standard fields
           if (response.status === 400) {
             let shouldRetry = false;
             if (thinkSupported && /["'`]?think["'`]?/i.test(errText)) {
@@ -1137,15 +1292,53 @@ export async function generateAIChatResponse(
               streamOptionsSupported = false;
               shouldRetry = true;
             }
+            if (penaltiesSupported && /(presence_penalty|frequency_penalty)/i.test(errText)) {
+              penaltiesSupported = false;
+              shouldRetry = true;
+            }
             if (toolsEnabledForRequest && /\b(tools?|tool_choice|function_declarations)\b/i.test(errText)) {
               toolsEnabledForRequest = false;
               shouldRetry = true;
+            }
+            if (!shouldRetry && /invalid argument/i.test(errText)) {
+              if (streamOptionsSupported && isStreamWanted && !isStepProgress) {
+                streamOptionsSupported = false;
+                shouldRetry = true;
+              } else if (penaltiesSupported && (modelPresence !== 0 || modelFrequency !== 0)) {
+                penaltiesSupported = false;
+                shouldRetry = true;
+              }
             }
             if (shouldRetry) {
               logger.warn('AIProvider', `Model "${modelId}" returned HTTP 400 for optional fields; retrying with cleaner OpenAI payload.`);
               continue;
             }
           }
+
+          const messageStructureSummary = conversationMessages.map((m, idx) => ({
+            i: idx,
+            role: m.role,
+            contentType: m.content === null ? 'null' : typeof m.content,
+            contentLen: typeof m.content === 'string' ? m.content.length : 0,
+            tool_call_id: m.tool_call_id,
+            name: m.name,
+            tool_calls: Array.isArray(m.tool_calls)
+              ? m.tool_calls.map((tc: any) => ({
+                  id: tc.id,
+                  name: tc.function?.name,
+                  argsLen: typeof tc.function?.arguments === 'string' ? tc.function.arguments.length : 0,
+                  hasExtraContent: tc.extra_content !== undefined,
+                }))
+              : undefined,
+          }));
+          logger.error(
+            'AIProvider',
+            `HTTP ${response.status} on turn ${turn + 1} (${turnKind}) -> ${endpointUrl} | params=${JSON.stringify(
+              Object.keys(requestSnapshotParams)
+            )} | toolsCount=${toolsEnabledForRequest ? openAiTools.length : 0} | messages=${JSON.stringify(
+              messageStructureSummary
+            )}`
+          );
 
           clearTimeout(timer);
           if (isStepProgress && turn === 0) {
@@ -1201,8 +1394,9 @@ export async function generateAIChatResponse(
         let promptEvalDurationMs: number | undefined;
         let evalDurationMs: number | undefined;
         let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedContent.length > 0;
+        let lastToolCallKey: string | null = null;
         const turnToolCallMap = new Map<
-          number,
+          string,
           {
             id: string;
             name: string;
@@ -1409,11 +1603,31 @@ export async function generateAIChatResponse(
               if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
                 if (firstOutputTokenAt === null) firstOutputTokenAt = Date.now();
                 rawToolCalls.forEach((tc: any, arrayIdx: number) => {
-                  const idx = typeof tc.index === 'number' ? tc.index : turnToolCallMap.size + arrayIdx;
-                  const existingKey = typeof tc.index === 'number' ? tc.index : arrayIdx;
+                  let existingKey: string;
+                  if (typeof tc.index === 'number') {
+                    existingKey = `idx_${tc.index}`;
+                  } else if (typeof tc.id === 'string' && tc.id.trim().length > 0) {
+                    existingKey = `id_${tc.id}`;
+                  } else if (lastToolCallKey) {
+                    const prev = turnToolCallMap.get(lastToolCallKey);
+                    if (
+                      tc.function?.name &&
+                      prev &&
+                      prev.name &&
+                      (prev.argumentsStr.trim().length > 0 || prev.argumentsObj !== null)
+                    ) {
+                      existingKey = `seq_${turnToolCallMap.size}_${arrayIdx}`;
+                    } else {
+                      existingKey = lastToolCallKey;
+                    }
+                  } else {
+                    existingKey = `seq_${turnToolCallMap.size}_${arrayIdx}`;
+                  }
+                  lastToolCallKey = existingKey;
+
                   if (!turnToolCallMap.has(existingKey)) {
                     turnToolCallMap.set(existingKey, {
-                      id: tc.id || `call_${turn}_${idx}`,
+                      id: tc.id || `call_${turn}_${turnToolCallMap.size + arrayIdx}`,
                       name: '',
                       argumentsStr: '',
                       argumentsObj: null,
@@ -1427,29 +1641,36 @@ export async function generateAIChatResponse(
                   } else if (tc.function?.arguments && typeof tc.function.arguments === 'object') {
                     entry.argumentsObj = tc.function.arguments;
                   }
-                  if (tc.extra_content !== undefined) {
+                  const incomingExtraContent =
+                    tc.extra_content !== undefined ? tc.extra_content : chunkObj?.extra_content;
+                  if (incomingExtraContent !== undefined) {
                     if (
                       entry.extraContent &&
                       typeof entry.extraContent === 'object' &&
-                      typeof tc.extra_content === 'object'
+                      typeof incomingExtraContent === 'object'
                     ) {
+                      const prevSig = entry.extraContent.google?.thought_signature;
+                      const nextSig = incomingExtraContent.google?.thought_signature;
                       entry.extraContent = {
                         ...entry.extraContent,
-                        ...tc.extra_content,
-                        ...(entry.extraContent.google || tc.extra_content.google
+                        ...incomingExtraContent,
+                        ...(entry.extraContent.google || incomingExtraContent.google
                           ? {
                               google: {
                                 ...(entry.extraContent.google || {}),
-                                ...(tc.extra_content.google || {}),
+                                ...(incomingExtraContent.google || {}),
+                                ...(prevSig && !nextSig ? { thought_signature: prevSig } : {}),
                               },
                             }
                           : {}),
                       };
                     } else {
-                      entry.extraContent = tc.extra_content;
+                      entry.extraContent = incomingExtraContent;
                     }
                   }
-                  if (tc.thought_signature !== undefined) {
+                  if (typeof tc.thought_signature === 'string' && tc.thought_signature.length > 0) {
+                    entry.thoughtSignature = tc.thought_signature;
+                  } else if (tc.thought_signature !== undefined && !entry.thoughtSignature) {
                     entry.thoughtSignature = tc.thought_signature;
                   }
                 });
@@ -1578,7 +1799,7 @@ export async function generateAIChatResponse(
           if (Array.isArray(messageObj?.tool_calls)) {
             messageObj.tool_calls.forEach((tc: any, idx: number) => {
               const argsVal = tc.function?.arguments;
-              turnToolCallMap.set(idx, {
+              turnToolCallMap.set(`idx_${idx}`, {
                 id: tc.id || `call_${turn}_${idx}`,
                 name: tc.function?.name || '',
                 argumentsStr: typeof argsVal === 'string' ? argsVal : '',
@@ -1705,9 +1926,10 @@ export async function generateAIChatResponse(
                 `[Auto-Continue #${autoContinueCount}] Model "${modelConfig.name}" ended incomplete (${check.reason}). Sending silent continue prompt.`
               );
               const isEmptyContent = turnContent.trim().length === 0 && accumulatedContent.trim().length === 0;
-              if (turnContent.trim().length > 0) {
-                conversationMessages.push({ role: 'assistant', content: turnContent });
-              }
+              conversationMessages.push({
+                role: 'assistant',
+                content: turnContent.trim().length > 0 ? turnContent : '(Đang tổng hợp dữ liệu...)',
+              });
               const continuePrompt = buildAutoContinuePrompt({
                 isEmptyContent,
                 accumulatedContent,
@@ -1731,16 +1953,22 @@ export async function generateAIChatResponse(
         // Parse arguments and append assistant tool-call message to conversationMessages
         const parsedCalls = pendingToolCalls.map((tc) => {
           let parsedArgs: Record<string, any> = {};
+          let validArgsJson = '';
           if (tc.argumentsObj) {
             parsedArgs = tc.argumentsObj;
-          } else if (tc.argumentsStr.trim()) {
+            validArgsJson = JSON.stringify(tc.argumentsObj);
+          } else if (tc.argumentsStr && tc.argumentsStr.trim()) {
             try {
               parsedArgs = JSON.parse(tc.argumentsStr);
+              validArgsJson = tc.argumentsStr.trim();
             } catch {
               parsedArgs = {};
+              validArgsJson = '{}';
             }
+          } else {
+            validArgsJson = '{}';
           }
-          return { ...tc, parsedArgs };
+          return { ...tc, parsedArgs, validArgsJson };
         });
 
         if (isOllamaNative) {
@@ -1757,16 +1985,18 @@ export async function generateAIChatResponse(
         } else {
           conversationMessages.push({
             role: 'assistant',
-            content: turnContent || null,
+            content: turnContent && turnContent.trim().length > 0 ? turnContent : null,
             tool_calls: parsedCalls.map((tc) => ({
               id: tc.id,
               type: 'function',
               function: {
                 name: tc.name,
-                arguments: tc.argumentsStr || JSON.stringify(tc.parsedArgs),
+                arguments: tc.validArgsJson || JSON.stringify(tc.parsedArgs || {}),
               },
               ...(tc.extraContent !== undefined ? { extra_content: tc.extraContent } : {}),
-              ...(tc.thoughtSignature !== undefined ? { thought_signature: tc.thoughtSignature } : {}),
+              ...(tc.thoughtSignature !== undefined && tc.extraContent === undefined
+                ? { thought_signature: tc.thoughtSignature }
+                : {}),
             })),
           });
         }
@@ -1846,18 +2076,20 @@ export async function generateAIChatResponse(
           if (idx >= 0) accumulatedSteps[idx] = doneStep;
           if (onChunk) onChunk({ type: 'progress', step: doneStep });
 
+          const safeToolContent =
+            toolResult.text && toolResult.text.trim().length > 0 ? toolResult.text : '(empty)';
           if (isOllamaNative) {
             conversationMessages.push({
               role: 'tool',
-              content: toolResult.text,
+              content: safeToolContent,
               tool_name: tc.name,
             });
           } else {
             conversationMessages.push({
               role: 'tool',
               tool_call_id: tc.id,
-              name: tc.name,
-              content: toolResult.text,
+              ...(isNativeOpenAIHost ? {} : { name: tc.name }),
+              content: safeToolContent,
             });
           }
         }
@@ -1926,6 +2158,7 @@ export async function generateAIChatResponse(
 
       return {
         content: timeoutNotice,
+        debug_traces: debugTraces.length > 0 ? debugTraces : undefined,
         tokensUsed: 40,
         latency_ms: latencyMs,
         tokens_per_second: 0,
@@ -1944,6 +2177,7 @@ export async function generateAIChatResponse(
 
     return {
       content: errorNotice,
+      debug_traces: debugTraces.length > 0 ? debugTraces : undefined,
       tokensUsed: 45,
       latency_ms: latencyMs,
       tokens_per_second: 0,
