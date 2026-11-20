@@ -257,6 +257,13 @@ export function isResponseIncomplete(params: {
     return { incomplete: false, reason: 'complete_punctuation' };
   }
 
+  // Treat responses ending with emoji/pictographs (e.g. "😊", "👍", "✅", "🙏") as complete
+  const trailingEmojiRegex =
+    /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}{2}|[\u2600-\u27BF]|[0-9#*]\uFE0F?\u20E3)(?:[\uFE0F\u20E3\u200D]|\p{Emoji_Modifier}|\p{Extended_Pictographic})*$/u;
+  if (trailingEmojiRegex.test(strippedTail)) {
+    return { incomplete: false, reason: 'complete_emoji' };
+  }
+
   return { incomplete: true, reason: 'missing_ending_punctuation' };
 }
 
