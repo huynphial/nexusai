@@ -138,6 +138,56 @@ function seedHistoricalToolsContext(msgs: ChatMessageItem[]): ExecutedToolContex
   return seeded;
 }
 
+function computeTurnSpeedMetrics(params: {
+  durationMs: number;
+  ttftMs?: number;
+  tokensIn: number;
+  tokensOut: number;
+  promptEvalDurationMs?: number;
+  evalDurationMs?: number;
+  isStream: boolean;
+}) {
+  const { durationMs, ttftMs, tokensIn, tokensOut, promptEvalDurationMs, evalDurationMs, isStream } = params;
+  const safeDurationMs = Math.max(durationMs, 1);
+  const resolvedTtftMs =
+    ttftMs !== undefined
+      ? Math.max(0, Math.round(ttftMs))
+      : promptEvalDurationMs !== undefined
+      ? Math.max(0, Math.round(promptEvalDurationMs))
+      : safeDurationMs;
+
+  const inputDurationMs =
+    promptEvalDurationMs !== undefined && promptEvalDurationMs > 0
+      ? promptEvalDurationMs
+      : resolvedTtftMs > 0
+      ? resolvedTtftMs
+      : safeDurationMs;
+
+  let outputDurationMs = safeDurationMs;
+  if (evalDurationMs !== undefined && evalDurationMs > 0) {
+    outputDurationMs = evalDurationMs;
+  } else if (isStream && ttftMs !== undefined && safeDurationMs - resolvedTtftMs >= 15 && tokensOut > 1) {
+    outputDurationMs = safeDurationMs - resolvedTtftMs;
+  }
+
+  const inputTokensPerSec =
+    tokensIn > 0 && inputDurationMs > 0
+      ? Number((tokensIn / (inputDurationMs / 1000)).toFixed(1))
+      : 0;
+  const outputTokensPerSec =
+    tokensOut > 0 && outputDurationMs > 0
+      ? Number((tokensOut / (outputDurationMs / 1000)).toFixed(1))
+      : 0;
+
+  return {
+    ttft_ms: resolvedTtftMs,
+    input_duration_ms: Number(inputDurationMs.toFixed(1)),
+    output_duration_ms: Number(outputDurationMs.toFixed(1)),
+    input_tokens_per_second: inputTokensPerSec,
+    output_tokens_per_second: outputTokensPerSec,
+  };
+}
+
 function truncateForTrace(value: any, maxLen = 12000): any {
   if (typeof value === 'string') {
     if (value.length <= maxLen) return value;
@@ -430,6 +480,7 @@ export async function generateAIChatResponse(
         let turnTokensOut = 0;
         let turnTokensTotalReported = 0;
         let turnTokensExact = false;
+        let firstOutputTokenAt: number | null = null;
         let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedText.length > 0;
 
         const appendGeminiText = (chunkText: string, emitStream: boolean) => {
@@ -483,6 +534,7 @@ export async function generateAIChatResponse(
               }
             }
             if (Array.isArray(chunk.functionCalls) && chunk.functionCalls.length > 0) {
+              if (firstOutputTokenAt === null) firstOutputTokenAt = Date.now();
               for (const fc of chunk.functionCalls) {
                 if (fc.name) {
                   turnFunctionCalls.push({ name: fc.name, args: (fc.args as Record<string, any>) || {} });
@@ -490,6 +542,10 @@ export async function generateAIChatResponse(
               }
             }
             const chunkText = chunk.text || '';
+            const hasCandidateParts = Boolean((chunk as any).candidates?.[0]?.content?.parts?.some((p: any) => p.text || p.functionCall));
+            if (firstOutputTokenAt === null && (chunkText.length > 0 || hasCandidateParts)) {
+              firstOutputTokenAt = Date.now();
+            }
             if (!chunkText) continue;
 
             if (allowThinking && (chunkText.includes('<think>') || inThinkingMode)) {
@@ -555,6 +611,15 @@ export async function generateAIChatResponse(
         totalTokensIn += turnTokensIn;
         totalTokensOut += turnTokensOut;
 
+        const turnDurationMs = Date.now() - turnStart;
+        const speedMetrics = computeTurnSpeedMetrics({
+          durationMs: turnDurationMs,
+          ttftMs: firstOutputTokenAt !== null ? firstOutputTokenAt - turnStart : undefined,
+          tokensIn: turnTokensIn,
+          tokensOut: turnTokensOut,
+          isStream: !!isStreamWanted,
+        });
+
         const geminiTurnTrace: LLMTraceTurn = {
           turn: turn + 1,
           kind: turnKind,
@@ -562,13 +627,14 @@ export async function generateAIChatResponse(
           model: modelName,
           endpoint: `gemini://${modelName}`,
           started_at: turnStartedAt,
-          duration_ms: Date.now() - turnStart,
+          duration_ms: turnDurationMs,
           status_code: 200,
           finish_reason: turnFinishReason || undefined,
           tokens_in: turnTokensIn,
           tokens_out: turnTokensOut,
           tokens_total: turnTokensTotal,
           tokens_exact: turnTokensExact,
+          ...speedMetrics,
           request: {
             model: modelName,
             stream: !!isStreamWanted,
@@ -1091,6 +1157,9 @@ export async function generateAIChatResponse(
         let turnTokensOut = 0;
         let turnTokensTotalReported = 0;
         let turnTokensExact = false;
+        let firstOutputTokenAt: number | null = null;
+        let promptEvalDurationMs: number | undefined;
+        let evalDurationMs: number | undefined;
         let pendingContinuationPrefixCheck = isAutoContinueTurn && accumulatedContent.length > 0;
         const turnToolCallMap = new Map<
           number,
@@ -1223,6 +1292,12 @@ export async function generateAIChatResponse(
                 }
                 turnTokensTotalReported = (parsed.prompt_eval_count || 0) + (parsed.eval_count || 0);
               }
+              if (typeof parsed.prompt_eval_duration === 'number' && parsed.prompt_eval_duration > 0) {
+                promptEvalDurationMs = parsed.prompt_eval_duration / 1e6;
+              }
+              if (typeof parsed.eval_duration === 'number' && parsed.eval_duration > 0) {
+                evalDurationMs = parsed.eval_duration / 1e6;
+              }
 
               // A. Check if the parsed chunk itself is a choices event
               if (
@@ -1285,6 +1360,7 @@ export async function generateAIChatResponse(
               // 2. Check tool_calls (Ollama native message.tool_calls or OpenAI SSE delta.tool_calls)
               const rawToolCalls = chunkObj?.tool_calls;
               if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+                if (firstOutputTokenAt === null) firstOutputTokenAt = Date.now();
                 rawToolCalls.forEach((tc: any, arrayIdx: number) => {
                   const idx = typeof tc.index === 'number' ? tc.index : turnToolCallMap.size + arrayIdx;
                   const existingKey = typeof tc.index === 'number' ? tc.index : arrayIdx;
@@ -1317,10 +1393,13 @@ export async function generateAIChatResponse(
                 parsed.reasoning ??
                 '';
 
-              if (typeof reasoningText === 'string' && reasoningText.length > 0 && allowThinking) {
-                turnThinking += reasoningText;
-                accumulatedThinking += reasoningText;
-                onChunk({ type: 'thinking', text: reasoningText });
+              if (typeof reasoningText === 'string' && reasoningText.length > 0) {
+                if (firstOutputTokenAt === null) firstOutputTokenAt = Date.now();
+                if (allowThinking) {
+                  turnThinking += reasoningText;
+                  accumulatedThinking += reasoningText;
+                  onChunk({ type: 'thinking', text: reasoningText });
+                }
               }
 
               // 4. Check regular content
@@ -1332,6 +1411,7 @@ export async function generateAIChatResponse(
                   : '';
 
               if (contentChunk.length > 0) {
+                if (firstOutputTokenAt === null) firstOutputTokenAt = Date.now();
                 emitContentWithThinkTags(contentChunk);
               }
             } catch {
@@ -1416,6 +1496,12 @@ export async function generateAIChatResponse(
             }
             turnTokensTotalReported = (data.prompt_eval_count || 0) + (data.eval_count || 0);
           }
+          if (typeof data.prompt_eval_duration === 'number' && data.prompt_eval_duration > 0) {
+            promptEvalDurationMs = data.prompt_eval_duration / 1e6;
+          }
+          if (typeof data.eval_duration === 'number' && data.eval_duration > 0) {
+            evalDurationMs = data.eval_duration / 1e6;
+          }
 
           if (Array.isArray(messageObj?.tool_calls)) {
             messageObj.tool_calls.forEach((tc: any, idx: number) => {
@@ -1475,6 +1561,17 @@ export async function generateAIChatResponse(
         totalTokensOut += turnTokensOut;
         reportedTotalTokens += turnTokensTotal;
 
+        const turnDurationMs = Date.now() - turnStart;
+        const speedMetrics = computeTurnSpeedMetrics({
+          durationMs: turnDurationMs,
+          ttftMs: firstOutputTokenAt !== null ? firstOutputTokenAt - turnStart : undefined,
+          tokensIn: turnTokensIn,
+          tokensOut: turnTokensOut,
+          promptEvalDurationMs,
+          evalDurationMs,
+          isStream: !!(isStreamWanted && response.body && onChunk),
+        });
+
         const turnTrace: LLMTraceTurn = {
           turn: turn + 1,
           kind: turnKind,
@@ -1482,13 +1579,14 @@ export async function generateAIChatResponse(
           model: modelId,
           endpoint: endpointUrl,
           started_at: turnStartedAt,
-          duration_ms: Date.now() - turnStart,
+          duration_ms: turnDurationMs,
           status_code: response.status,
           finish_reason: turnFinishReason || undefined,
           tokens_in: turnTokensIn,
           tokens_out: turnTokensOut,
           tokens_total: turnTokensTotal,
           tokens_exact: turnTokensExact,
+          ...speedMetrics,
           request: {
             model: modelId,
             stream: !!isStreamWanted,

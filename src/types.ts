@@ -69,6 +69,11 @@ export interface LLMTraceTurn {
   tokens_out: number;
   tokens_total: number;
   tokens_exact?: boolean;
+  ttft_ms?: number;
+  input_duration_ms?: number;
+  output_duration_ms?: number;
+  input_tokens_per_second?: number;
+  output_tokens_per_second?: number;
   request: {
     model: string;
     stream?: boolean;

@@ -884,13 +884,24 @@ const TraceTurnItem: React.FC<{ trace: LLMTraceTurn }> = ({ trace }) => {
           )}
         </div>
 
-        <div className="flex items-center gap-2 text-[10px]">
-          <span className="px-1.5 py-0.2 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20">
+        <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+          <span className="px-1.5 py-0.2 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20" title="Số lượng & tốc độ xử lý Input Token">
             IN: <b>{trace.tokens_in.toLocaleString()}</b>
+            {trace.input_tokens_per_second !== undefined && (
+              <span className="opacity-85"> ({trace.input_tokens_per_second} tk/s)</span>
+            )}
           </span>
-          <span className="px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+          <span className="px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20" title="Số lượng & tốc độ sinh Output Token">
             OUT: <b>{trace.tokens_out.toLocaleString()}</b>
+            {trace.output_tokens_per_second !== undefined && (
+              <span className="opacity-85"> ({trace.output_tokens_per_second} tk/s)</span>
+            )}
           </span>
+          {trace.ttft_ms !== undefined && (
+            <span className="px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20" title="Thời gian trễ nhận được token output đầu tiên (TTFT)">
+              TTFT: <b>{formatDuration(trace.ttft_ms)}</b>
+            </span>
+          )}
           <span className="text-slate-500 dark:text-slate-400">
             {formatDuration(trace.duration_ms)}
           </span>
@@ -900,14 +911,43 @@ const TraceTurnItem: React.FC<{ trace: LLMTraceTurn }> = ({ trace }) => {
 
       {expanded && (
         <div className="p-2.5 border-t border-slate-200 dark:border-slate-800 space-y-2.5 bg-white dark:bg-slate-950/90 text-[10px]">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+            <div className="px-2 py-1.5 rounded-lg bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/60 dark:border-blue-900/50">
+              <div className="text-[9.5px] text-blue-600 dark:text-blue-400">Input Token</div>
+              <div className="font-bold text-slate-800 dark:text-slate-100">
+                {trace.tokens_in.toLocaleString()} tokens
+                {trace.input_tokens_per_second !== undefined && (
+                  <span className="ml-1.5 text-blue-700 dark:text-blue-300">· {trace.input_tokens_per_second} token/s</span>
+                )}
+              </div>
+            </div>
+            <div className="px-2 py-1.5 rounded-lg bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-900/50">
+              <div className="text-[9.5px] text-emerald-600 dark:text-emerald-400">Output Token</div>
+              <div className="font-bold text-slate-800 dark:text-slate-100">
+                {trace.tokens_out.toLocaleString()} tokens
+                {trace.output_tokens_per_second !== undefined && (
+                  <span className="ml-1.5 text-emerald-700 dark:text-emerald-300">· {trace.output_tokens_per_second} token/s</span>
+                )}
+              </div>
+            </div>
+            <div className="px-2 py-1.5 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-900/50">
+              <div className="text-[9.5px] text-amber-600 dark:text-amber-400">Trễ token đầu tiên (TTFT)</div>
+              <div className="font-bold text-slate-800 dark:text-slate-100">
+                {trace.ttft_ms !== undefined ? formatDuration(trace.ttft_ms) : 'N/A'}
+                <span className="ml-1.5 font-normal text-slate-500 dark:text-slate-400">
+                  / Tổng {formatDuration(trace.duration_ms)}
+                </span>
+              </div>
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center justify-between gap-2 text-slate-500 dark:text-slate-400">
             <span>
               Thời điểm: <b className="text-slate-700 dark:text-slate-300">{new Date(trace.started_at).toLocaleTimeString()}</b>
-              {' · '}Thời lượng: <b className="text-slate-700 dark:text-slate-300">{formatDuration(trace.duration_ms)}</b>
+              {' · '}Thời lượng lượt: <b className="text-slate-700 dark:text-slate-300">{formatDuration(trace.duration_ms)}</b>
             </span>
             <span>
-              Token: IN {trace.tokens_in.toLocaleString()} / OUT {trace.tokens_out.toLocaleString()} / Tổng {trace.tokens_total.toLocaleString()}
-              {' '}({trace.tokens_exact ? 'từ API' : 'ước tính'})
+              Tổng token: <b>{trace.tokens_total.toLocaleString()}</b> ({trace.tokens_exact ? 'từ API' : 'ước tính'})
             </span>
           </div>
 
@@ -986,6 +1026,27 @@ const DebugThinkingPanel = ({
   const totalIn = traces.reduce((sum, t) => sum + (t.tokens_in || 0), 0);
   const totalOut = traces.reduce((sum, t) => sum + (t.tokens_out || 0), 0);
   const totalTraceMs = traces.reduce((sum, t) => sum + (t.duration_ms || 0), 0);
+  const totalInputDurationMs = traces.reduce(
+    (sum, t) => sum + (t.input_duration_ms || t.ttft_ms || t.duration_ms || 0),
+    0
+  );
+  const totalOutputDurationMs = traces.reduce(
+    (sum, t) => sum + (t.output_duration_ms || t.duration_ms || 0),
+    0
+  );
+  const avgInputSpeed =
+    traces.length === 1 && traces[0].input_tokens_per_second !== undefined
+      ? traces[0].input_tokens_per_second
+      : totalIn > 0 && totalInputDurationMs > 0
+      ? Number((totalIn / (totalInputDurationMs / 1000)).toFixed(1))
+      : 0;
+  const avgOutputSpeed =
+    traces.length === 1 && traces[0].output_tokens_per_second !== undefined
+      ? traces[0].output_tokens_per_second
+      : totalOut > 0 && totalOutputDurationMs > 0
+      ? Number((totalOut / (totalOutputDurationMs / 1000)).toFixed(1))
+      : 0;
+  const firstTokenLatencyMs = traces.length > 0 ? traces[0].ttft_ms : undefined;
 
   return (
     <div className="mb-2.5 rounded-xl border border-purple-200/80 dark:border-purple-900/60 bg-purple-50/50 dark:bg-purple-950/30 overflow-hidden text-xs transition-all shadow-2xs">
@@ -999,7 +1060,8 @@ const DebugThinkingPanel = ({
           <span>Thông tin Kỹ thuật Debug (API Models &amp; System Prompt)</span>
           {isAdmin && traces.length > 0 && (
             <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-700 dark:text-purple-300 border border-purple-500/20 font-mono">
-              {traces.length} trace · IN {totalIn.toLocaleString()} / OUT {totalOut.toLocaleString()}
+              {traces.length} trace · IN {totalIn.toLocaleString()} ({avgInputSpeed} tk/s) · OUT {totalOut.toLocaleString()} ({avgOutputSpeed} tk/s)
+              {firstTokenLatencyMs !== undefined ? ` · TTFT ${formatDuration(firstTokenLatencyMs)}` : ''}
             </span>
           )}
         </div>
@@ -1027,7 +1089,7 @@ const DebugThinkingPanel = ({
               </span>
             </div>
             <div>
-              <span className="text-slate-400">Tốc độ sinh token:</span>{' '}
+              <span className="text-slate-400">Tốc độ tổng (In+Out):</span>{' '}
               <b className="text-emerald-600 dark:text-emerald-400">{msg.tokens_per_second || 0} token/s</b>
             </div>
             <div className="sm:col-span-2">
@@ -1050,26 +1112,47 @@ const DebugThinkingPanel = ({
             </div>
           )}
 
-          {/* Admin-only Request / Response Trace & Token IN/OUT */}
+          {/* Admin-only Request / Response Trace & Detailed Token/Speed/TTFT Stats */}
           {isAdmin && traces.length > 0 && (
             <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-purple-700 dark:text-purple-300 font-bold text-[10.5px] flex items-center gap-1.5">
-                  <span>Trace Request / Response AI Model ({traces.length} lượt)</span>
+                  <span>Thống kê Token &amp; Trace AI Model ({traces.length} lượt)</span>
                 </div>
-                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-                  <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20">
-                    Token IN: <b>{totalIn.toLocaleString()}</b>
-                  </span>
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
-                    Token OUT: <b>{totalOut.toLocaleString()}</b>
-                  </span>
-                  <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20">
-                    Tổng: <b>{(totalIn + totalOut).toLocaleString()}</b>
-                  </span>
-                  <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-                    Thời gian API: <b>{formatDuration(totalTraceMs)}</b>
-                  </span>
+                <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px]">
+                  Tổng token: <b>{(totalIn + totalOut).toLocaleString()}</b> · Thời gian API: <b>{formatDuration(totalTraceMs)}</b>
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[10px]">
+                <div className="p-2 rounded-lg bg-blue-50/80 dark:bg-blue-950/30 border border-blue-200/70 dark:border-blue-900/60">
+                  <div className="text-blue-600 dark:text-blue-400 font-semibold">Input Token</div>
+                  <div className="mt-0.5 text-slate-800 dark:text-slate-100">
+                    Số lượng: <b>{totalIn.toLocaleString()}</b>
+                  </div>
+                  <div className="text-blue-700 dark:text-blue-300">
+                    Tốc độ: <b>{avgInputSpeed} token/s</b>
+                  </div>
+                </div>
+
+                <div className="p-2 rounded-lg bg-emerald-50/80 dark:bg-emerald-950/30 border border-emerald-200/70 dark:border-emerald-900/60">
+                  <div className="text-emerald-600 dark:text-emerald-400 font-semibold">Output Token</div>
+                  <div className="mt-0.5 text-slate-800 dark:text-slate-100">
+                    Số lượng: <b>{totalOut.toLocaleString()}</b>
+                  </div>
+                  <div className="text-emerald-700 dark:text-emerald-300">
+                    Tốc độ: <b>{avgOutputSpeed} token/s</b>
+                  </div>
+                </div>
+
+                <div className="p-2 rounded-lg bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/60">
+                  <div className="text-amber-600 dark:text-amber-400 font-semibold">Trễ token output đầu tiên</div>
+                  <div className="mt-0.5 text-slate-800 dark:text-slate-100">
+                    TTFT: <b>{firstTokenLatencyMs !== undefined ? formatDuration(firstTokenLatencyMs) : 'N/A'}</b>
+                  </div>
+                  <div className="text-amber-700 dark:text-amber-300">
+                    Tổng API: <b>{formatDuration(totalTraceMs)}</b>
+                  </div>
                 </div>
               </div>
 
