@@ -2,11 +2,126 @@ import { Router, Response } from 'express';
 import { query, getOne, run } from '../db';
 import { authenticateToken, CustomRequest } from '../auth';
 import { checkRateLimitAndQuota, logTokenUsage } from '../rateLimiter';
-import { generateAIChatResponse } from '../aiProvider';
+import { generateAIChatResponse, ChatMessageItem } from '../aiProvider';
 import { logger } from '../logger';
+import type { LLMTraceTurn, ToolContextEntry } from '../../types';
 
 const router = Router();
 router.use(authenticateToken);
+
+function extractLegacyToolContextFromTraces(debugTracesRaw?: string | null): ToolContextEntry[] | undefined {
+  if (!debugTracesRaw) return undefined;
+  try {
+    const traces: LLMTraceTurn[] = JSON.parse(debugTracesRaw);
+    if (!Array.isArray(traces) || traces.length === 0) return undefined;
+
+    const lastTrace = traces[traces.length - 1];
+    const reqMessages = lastTrace?.request?.messages;
+    if (!Array.isArray(reqMessages) || reqMessages.length === 0) return undefined;
+
+    const entries: ToolContextEntry[] = [];
+    const callById = new Map<string, { name: string; args: Record<string, any> }>();
+    const geminiCallQueue: Array<{ name: string; args: Record<string, any> }> = [];
+
+    for (const msg of reqMessages) {
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          const fnName = tc?.function?.name || tc?.name || '';
+          let parsedArgs: Record<string, any> = {};
+          const rawArgs = tc?.function?.arguments ?? tc?.arguments;
+          if (rawArgs && typeof rawArgs === 'object') {
+            parsedArgs = rawArgs;
+          } else if (typeof rawArgs === 'string' && rawArgs.trim()) {
+            try {
+              parsedArgs = JSON.parse(rawArgs);
+            } catch {
+              parsedArgs = {};
+            }
+          }
+          if (tc?.id) {
+            callById.set(tc.id, { name: fnName, args: parsedArgs });
+          }
+        }
+      } else if (msg.role === 'model' && Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if (part?.functionCall?.name) {
+            geminiCallQueue.push({
+              name: part.functionCall.name,
+              args: part.functionCall.args || {},
+            });
+          }
+        }
+      } else if (msg.role === 'tool') {
+        const callInfo = msg.tool_call_id ? callById.get(msg.tool_call_id) : undefined;
+        const resultText =
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '');
+        entries.push({
+          tool: msg.name || callInfo?.name || 'mcp_tool',
+          args: callInfo?.args || {},
+          result: resultText.slice(0, 20000),
+        });
+      } else if (msg.role === 'user' && Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if (part?.functionResponse?.name) {
+            const matchedCallIdx = geminiCallQueue.findIndex(
+              (c) => c.name === part.functionResponse.name
+            );
+            const matchedCall =
+              matchedCallIdx >= 0 ? geminiCallQueue.splice(matchedCallIdx, 1)[0] : undefined;
+            const respObj = part.functionResponse.response;
+            const resultText =
+              typeof respObj?.result === 'string'
+                ? respObj.result
+                : JSON.stringify(respObj ?? '');
+            entries.push({
+              tool: part.functionResponse.name,
+              args: matchedCall?.args || {},
+              result: resultText.slice(0, 20000),
+            });
+          }
+        }
+      }
+    }
+
+    return entries.length > 0 ? entries : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadSessionConversationHistory(sessionId: number): Promise<ChatMessageItem[]> {
+  const rows = await query(
+    `SELECT sender as role, content, thinking_content, tool_context, debug_traces
+     FROM chat_messages
+     WHERE session_id = ?
+     ORDER BY id ASC`,
+    [sessionId]
+  );
+
+  return rows.map((row: any): ChatMessageItem => {
+    let parsedToolContext: ToolContextEntry[] | undefined;
+    if (row.tool_context) {
+      try {
+        const arr = JSON.parse(row.tool_context);
+        if (Array.isArray(arr) && arr.length > 0) {
+          parsedToolContext = arr;
+        }
+      } catch {
+        parsedToolContext = undefined;
+      }
+    }
+    if (!parsedToolContext && row.role === 'assistant' && row.debug_traces) {
+      parsedToolContext = extractLegacyToolContextFromTraces(row.debug_traces);
+    }
+
+    return {
+      role: row.role,
+      content: row.content || '',
+      thinking_content: row.thinking_content || null,
+      tool_context: parsedToolContext,
+    };
+  });
+}
 
 // Get available models assigned to the user's group, along with live quota usage
 router.get('/available-models', async (req: CustomRequest, res: Response) => {
@@ -323,11 +438,7 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
     [currentSessionId, prompt.trim()]
   );
 
-  const history = await query(
-    `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 20`,
-    [currentSessionId]
-  );
-  history.reverse();
+  const history = await loadSessionConversationHistory(currentSessionId);
 
   const isAdmin = req.user?.role === 'admin';
 
@@ -375,14 +486,15 @@ router.post('/stream', async (req: CustomRequest, res: Response) => {
       return;
     }
 
-    // Save assistant message to database with thinking content, progress steps, choices, debug traces & performance metrics
+    // Save assistant message to database with thinking content, tool context, progress steps, choices, debug traces & performance metrics
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, debug_traces, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, tool_context, progress_steps, x_choices, debug_traces, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
+        aiResult.tool_context ? JSON.stringify(aiResult.tool_context) : null,
         aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
         aiResult.x_choices ? JSON.stringify(aiResult.x_choices) : null,
         aiResult.debug_traces ? JSON.stringify(aiResult.debug_traces) : null,
@@ -512,11 +624,7 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
       [currentSessionId, prompt.trim()]
     );
 
-    const history = await query(
-      `SELECT sender as role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 20`,
-      [currentSessionId]
-    );
-    history.reverse();
+    const history = await loadSessionConversationHistory(currentSessionId);
 
     const isAdmin = req.user?.role === 'admin';
     const userInfo = {
@@ -531,12 +639,13 @@ router.post('/send', async (req: CustomRequest, res: Response) => {
     const aiResult = await generateAIChatResponse(modelConfig, history, undefined, userInfo, currentSessionId);
 
     const assistantMsgRes = await run(
-      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, progress_steps, x_choices, debug_traces, tokens_used, latency_ms, tokens_per_second)
-       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, sender, content, thinking_content, tool_context, progress_steps, x_choices, debug_traces, tokens_used, latency_ms, tokens_per_second)
+       VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         currentSessionId,
         aiResult.content,
         aiResult.thinking_content || null,
+        aiResult.tool_context ? JSON.stringify(aiResult.tool_context) : null,
         aiResult.progress_steps ? JSON.stringify(aiResult.progress_steps) : null,
         aiResult.x_choices ? JSON.stringify(aiResult.x_choices) : null,
         aiResult.debug_traces ? JSON.stringify(aiResult.debug_traces) : null,

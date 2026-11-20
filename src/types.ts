@@ -211,12 +211,21 @@ export interface ChoicePromptData {
   note?: string;
 }
 
+export interface ToolContextEntry {
+  tool: string;
+  server?: string;
+  args: Record<string, any>;
+  result: string;
+  is_error?: boolean;
+}
+
 export interface ChatMessage {
   id: number;
   session_id: number;
   sender: 'user' | 'assistant' | 'system';
   content: string;
   thinking_content?: string;
+  tool_context?: ToolContextEntry[];
   progress_steps?: ProgressStep[];
   progress_summary?: ProgressSummary;
   x_choices?: ChoicePromptData;

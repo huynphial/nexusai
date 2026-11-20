@@ -1,11 +1,13 @@
 import { GoogleGenAI } from '@google/genai';
 import { logger } from './logger';
 import { getMcpToolBindingsForModel, callMcpTool, McpToolBinding } from './mcpClient';
-import type { LLMTraceTurn } from '../types';
+import type { LLMTraceTurn, ToolContextEntry } from '../types';
 
 export interface ChatMessageItem {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  thinking_content?: string | null;
+  tool_context?: ToolContextEntry[];
 }
 
 export interface AIModelConfig {
@@ -41,6 +43,7 @@ export interface StreamChunk {
 export interface AIResponse {
   content: string;
   thinking_content?: string;
+  tool_context?: ToolContextEntry[];
   progress_steps?: any[];
   progress_summary?: any;
   x_choices?: any;
@@ -80,6 +83,59 @@ interface ExecutedToolContextItem {
   tool: string;
   args: Record<string, any>;
   resultSnippet: string;
+}
+
+function formatHistoryMessageContent(m: ChatMessageItem): string {
+  if (m.role !== 'assistant') {
+    return m.content || '';
+  }
+
+  const hasThinking = Boolean(m.thinking_content && m.thinking_content.trim().length > 0);
+  const hasTools = Array.isArray(m.tool_context) && m.tool_context.length > 0;
+
+  if (!hasThinking && !hasTools) {
+    return m.content || '';
+  }
+
+  const sections: string[] = [];
+
+  if (hasThinking) {
+    sections.push(
+      `[Kết quả suy luận (Thinking) ở lượt này]:\n${m.thinking_content!.trim().slice(0, 12000)}`
+    );
+  }
+
+  if (hasTools) {
+    const toolLines = m.tool_context!.map((tc, idx) => {
+      const serverLabel = tc.server ? ` (${tc.server})` : '';
+      const errLabel = tc.is_error ? ' [ERROR]' : '';
+      const argsJson = JSON.stringify(tc.args || {});
+      return `- [${idx + 1}] Tool \`${tc.tool}\`${serverLabel} | args: ${argsJson}${errLabel}:\n${tc.result}`;
+    });
+    sections.push(`[Kết quả Tool đã gọi ở lượt này]:\n${toolLines.join('\n\n')}`);
+  }
+
+  if (m.content && m.content.trim().length > 0) {
+    sections.push(`[Câu trả lời cuối ở lượt này]:\n${m.content.trim()}`);
+  }
+
+  return sections.join('\n\n');
+}
+
+function seedHistoricalToolsContext(msgs: ChatMessageItem[]): ExecutedToolContextItem[] {
+  const seeded: ExecutedToolContextItem[] = [];
+  for (const m of msgs) {
+    if (Array.isArray(m.tool_context)) {
+      for (const tc of m.tool_context) {
+        seeded.push({
+          tool: tc.tool,
+          args: tc.args || {},
+          resultSnippet: (tc.result || '').slice(0, 1200),
+        });
+      }
+    }
+  }
+  return seeded;
 }
 
 function truncateForTrace(value: any, maxLen = 12000): any {
@@ -213,6 +269,17 @@ export async function generateAIChatResponse(
   externalSignal?: AbortSignal
 ): Promise<AIResponse> {
   const systemPrompt = modelConfig.system_prompt || 'Bạn là trợ lý trí tuệ nhân tạo Local AI, hỗ trợ người dùng chu đáo bằng Tiếng Việt.';
+  const hasPriorToolOrThinkingContext = messages.some(
+    (m) =>
+      m.role === 'assistant' &&
+      Boolean(
+        (m.thinking_content && m.thinking_content.trim().length > 0) ||
+          (Array.isArray(m.tool_context) && m.tool_context.length > 0)
+      )
+  );
+  const effectiveSystemPrompt = hasPriorToolOrThinkingContext
+    ? `${systemPrompt}\n\n[Hướng dẫn tái sử dụng ngữ cảnh hội thoại]: Lịch sử hội thoại phía dưới đã bao gồm đầy đủ kết quả suy luận (Thinking) và dữ liệu trả về từ các Tool đã chạy ở những lượt trước. Hãy ưu tiên đọc và tái sử dụng trực tiếp các dữ liệu/kết quả đã có trong lịch sử để trả lời câu hỏi tiếp theo. KHÔNG gọi lại các tool đã thực thi với cùng tham số trừ khi cần làm mới dữ liệu hoặc truy vấn tham số mới hoàn toàn.`
+    : systemPrompt;
   const timeoutSeconds = modelConfig.timeout_seconds && modelConfig.timeout_seconds > 0 ? modelConfig.timeout_seconds : 60;
   const isStreamWanted = onChunk && (modelConfig.enable_stream === 1 || modelConfig.enable_stream === true || modelConfig.enable_stream === undefined);
   const allowThinking = modelConfig.enable_thinking === 1 || modelConfig.enable_thinking === true || modelConfig.enable_thinking === undefined;
@@ -285,7 +352,7 @@ export async function generateAIChatResponse(
 
       const formattedContents: any[] = messages.map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
+        parts: [{ text: formatHistoryMessageContent(m) }],
       }));
       if (formattedContents.length === 0) {
         formattedContents.push({ role: 'user', parts: [{ text: 'Xin chào' }] });
@@ -295,7 +362,8 @@ export async function generateAIChatResponse(
       let accumulatedThinking = '';
       const geminiSteps: any[] = [];
       const geminiTraces: LLMTraceTurn[] = [];
-      const executedToolsContext: ExecutedToolContextItem[] = [];
+      const toolContextEntries: ToolContextEntry[] = [];
+      const executedToolsContext: ExecutedToolContextItem[] = seedHistoricalToolsContext(messages);
       let totalTokensIn = 0;
       let totalTokensOut = 0;
 
@@ -304,7 +372,7 @@ export async function generateAIChatResponse(
       const modelMaxTokens = typeof modelConfig.max_tokens === 'number' && modelConfig.max_tokens > 0 ? modelConfig.max_tokens : undefined;
 
       const geminiConfig: any = {
-        systemInstruction: systemPrompt,
+        systemInstruction: effectiveSystemPrompt,
         temperature: modelTemp,
         topP: modelTopP,
         abortSignal: abortController.signal,
@@ -343,7 +411,7 @@ export async function generateAIChatResponse(
           : 'initial';
 
         const requestSnapshotMessages = [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: effectiveSystemPrompt },
           ...cloneMessagesForTrace(formattedContents),
         ];
 
@@ -606,7 +674,14 @@ export async function generateAIChatResponse(
           executedToolsContext.push({
             tool: toolName,
             args: fc.args || {},
-            resultSnippet: toolResult.text.slice(0, 600),
+            resultSnippet: toolResult.text.slice(0, 1200),
+          });
+          toolContextEntries.push({
+            tool: toolName,
+            server: serverName,
+            args: fc.args || {},
+            result: toolResult.text.slice(0, 20000),
+            is_error: toolResult.isError || undefined,
           });
 
           const doneStep = {
@@ -661,6 +736,7 @@ export async function generateAIChatResponse(
       return {
         content: finalContent,
         thinking_content: allowThinking ? finalThinking : undefined,
+        tool_context: toolContextEntries.length > 0 ? toolContextEntries : undefined,
         progress_steps: geminiSteps.length > 0 ? geminiSteps : undefined,
         debug_traces: geminiTraces.length > 0 ? geminiTraces : undefined,
         tokensUsed: totalTokens,
@@ -676,8 +752,11 @@ export async function generateAIChatResponse(
       const modelId = modelConfig.model_identifier || (isStepProgress ? 'qwen3:8b' : 'gpt-4o');
 
       const fullMessages: Array<{ role: string; content: string }> = [
-        { role: 'system', content: systemPrompt },
-        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        { role: 'system', content: effectiveSystemPrompt },
+        ...messages.map((m) => ({
+          role: m.role,
+          content: formatHistoryMessageContent(m),
+        })),
       ];
 
       // If step_progress and no API token provided, or if test mode
@@ -777,7 +856,8 @@ export async function generateAIChatResponse(
       let accumulatedThinking = '';
       const accumulatedSteps: any[] = [];
       const debugTraces: LLMTraceTurn[] = [];
-      const executedToolsContext: ExecutedToolContextItem[] = [];
+      const toolContextEntries: ToolContextEntry[] = [];
+      const executedToolsContext: ExecutedToolContextItem[] = seedHistoricalToolsContext(messages);
       let accumulatedSummary: any = null;
       let accumulatedChoices: any = undefined;
       let totalTokensIn = 0;
@@ -1556,7 +1636,14 @@ export async function generateAIChatResponse(
           executedToolsContext.push({
             tool: toolName,
             args: tc.parsedArgs || {},
-            resultSnippet: toolResult.text.slice(0, 600),
+            resultSnippet: toolResult.text.slice(0, 1200),
+          });
+          toolContextEntries.push({
+            tool: toolName,
+            server: serverName,
+            args: tc.parsedArgs || {},
+            result: toolResult.text.slice(0, 20000),
+            is_error: toolResult.isError || undefined,
           });
 
           const doneStep = {
@@ -1610,6 +1697,7 @@ export async function generateAIChatResponse(
       return {
         content: accumulatedContent,
         thinking_content: allowThinking ? accumulatedThinking : undefined,
+        tool_context: toolContextEntries.length > 0 ? toolContextEntries : undefined,
         progress_steps: accumulatedSteps.length > 0 ? accumulatedSteps : undefined,
         progress_summary: accumulatedSummary || undefined,
         x_choices: accumulatedChoices || undefined,

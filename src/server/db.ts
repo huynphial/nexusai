@@ -227,6 +227,7 @@ export async function initDatabase() {
         sender TEXT NOT NULL,
         content TEXT NOT NULL,
         thinking_content TEXT,
+        tool_context TEXT,
         x_choices TEXT,
         debug_traces TEXT,
         tokens_used INTEGER DEFAULT 0,
@@ -321,6 +322,9 @@ export async function initDatabase() {
       }
       if (!msgColNames.includes('debug_traces')) {
         await run(`ALTER TABLE chat_messages ADD COLUMN debug_traces TEXT`);
+      }
+      if (!msgColNames.includes('tool_context')) {
+        await run(`ALTER TABLE chat_messages ADD COLUMN tool_context TEXT`);
       }
 
       const groupCols = await query(`PRAGMA table_info(user_groups)`);
